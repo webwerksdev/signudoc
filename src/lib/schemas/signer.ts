@@ -2,7 +2,8 @@ import { z } from "zod";
 
 import {
   MAX_COPY_RECIPIENTS_PER_ENVELOPE,
-  MAX_SIGNERS_PER_ENVELOPE,
+  MAX_SIGNERS_CEILING,
+  recipientRoles,
   signatureMeanings,
   signerStatuses,
 } from "../types/domain.ts";
@@ -15,6 +16,7 @@ import {
 } from "./common.ts";
 
 export const signerStatusSchema = z.enum(signerStatuses);
+export const recipientRoleSchema = z.enum(recipientRoles);
 export const duplicateSignerEmailMessage =
   "Each signer must have a unique email address.";
 export const duplicateCopyRecipientEmailMessage =
@@ -33,6 +35,19 @@ export const draftSignerSchema = z.object({
   name: nameSchema,
   email: emailSchema,
   signOrder: z.number().int().positive().optional(),
+  // A signer, or an approver who reviews the document and approves or
+  // rejects it without fields of their own. Left out means a signer.
+  role: recipientRoleSchema.optional(),
+  // The step of the signing order this signer is in. Signers who share a
+  // step sign at the same time; see signing-steps.ts. Left out for every
+  // signer, they sign one after the other in the order of the list.
+  signingStep: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_SIGNERS_CEILING)
+    .nullable()
+    .optional(),
   // Extra checks before signing. accessCode: a string sets it, null removes
   // it, and leaving it out keeps the code already saved.
   accessCode: z.string().trim().min(4).max(64).nullable().optional(),
@@ -45,7 +60,9 @@ export const draftSignerSchema = z.object({
 export const signerListSchema = z
   .array(draftSignerSchema)
   .min(1)
-  .max(MAX_SIGNERS_PER_ENVELOPE)
+  // The install's own limit, which can be lower, is checked when the list
+  // is saved (signer-limit.ts).
+  .max(MAX_SIGNERS_CEILING)
   .superRefine((signers, ctx) => {
     const emails = new Set<string>();
     const signOrders = new Set<number>();
@@ -121,8 +138,10 @@ export const replaceSignersResponseSchema = z.object({
       hasAccessCode: z.boolean(),
       name: nameSchema,
       requireEmailCode: z.boolean(),
+      role: recipientRoleSchema,
       signatureMeaning: z.enum(signatureMeanings).nullable(),
       signOrder: z.number().int().positive(),
+      signingStep: z.number().int().positive(),
     }),
   ),
   updatedAt: unixTimestampSchema,

@@ -51,32 +51,38 @@ test("requests up to the limit pass, the next one waits, and the count starts ov
   assert.deepEqual(await at(0), {
     allowed: true,
     count: 1,
+    countedIn: "database",
     retryAfterSeconds: 60,
   });
   assert.deepEqual(await at(1000), {
     allowed: true,
     count: 2,
+    countedIn: "database",
     retryAfterSeconds: 59,
   });
   assert.deepEqual(await at(15_000), {
     allowed: false,
     count: 3,
+    countedIn: "database",
     retryAfterSeconds: 45,
   });
   // Trying again while blocked does not push the window back.
   assert.deepEqual(await at(59_000), {
     allowed: false,
     count: 4,
+    countedIn: "database",
     retryAfterSeconds: 1,
   });
   assert.deepEqual(await at(MINUTE), {
     allowed: true,
     count: 1,
+    countedIn: "database",
     retryAfterSeconds: 60,
   });
   assert.deepEqual(await at(MINUTE + 1), {
     allowed: true,
     count: 2,
+    countedIn: "database",
     retryAfterSeconds: 60,
   });
   assert.equal((await at(MINUTE + 2)).allowed, false);

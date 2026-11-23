@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { PDFDocument } from "pdf-lib";
 
 import type { EnvelopePageRecord } from "../schemas/envelope.ts";
-import { MAX_UPLOAD_SIZE_BYTES } from "../types/domain.ts";
+import { MAX_PDF_PAGES, MAX_UPLOAD_SIZE_BYTES } from "../types/domain.ts";
 import { getDisplayedPageGeometry } from "./pdf-page-geometry.ts";
 
 const PDF_MAGIC_HEADER = "%PDF-";
@@ -13,6 +13,7 @@ const PDF_IMPORT_ERROR_MESSAGES = {
     "This PDF is password-protected or encrypted. Please upload an unlocked PDF.",
   invalid_type: "Only PDF files are supported. Please upload a valid PDF.",
   too_large: "This file exceeds the 20 MB limit.",
+  too_many_pages: `This PDF has more than ${String(MAX_PDF_PAGES)} pages. Split it into smaller documents.`,
   unreadable_pdf: "We couldn't read this PDF. Please upload a valid file.",
   unsupported_variant:
     "This PDF uses an unsupported format. Please export it as a standard PDF.",
@@ -23,6 +24,7 @@ export const pdfImportFailureCodes = [
   "encrypted_pdf",
   "invalid_type",
   "too_large",
+  "too_many_pages",
   "unreadable_pdf",
   "unsupported_variant",
   "upload_failed",
@@ -150,6 +152,10 @@ async function parsePdfDocument(
   const document = await PDFDocument.load(body, {
     ignoreEncryption: false,
   });
+
+  if (document.getPageCount() > MAX_PDF_PAGES) {
+    throw new DocumentImportError("too_many_pages");
+  }
 
   // The size of each page as a reader shows it: the CropBox, with width and
   // height swapped on a page rotated a quarter turn. The field overlay is

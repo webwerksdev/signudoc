@@ -40,7 +40,7 @@
 
 ### Prepare a document in minutes
 
-Upload a PDF, add up to 10 signers in the order they sign, and add people who only receive the finished copy. Then place fields where they belong: signature, initials, date, name, text, number, checkbox, dropdown and radio buttons, each required or optional and each tied to one signer.
+Upload a PDF, add up to 25 signers in the order they sign, or have some of them sign at the same time, and add people who only receive the finished copy. Then place fields where they belong: signature, initials, date, name, text, number, checkbox, dropdown and radio buttons, each required or optional and each tied to one signer.
 
 ![Placing signature, date and dropdown fields for two signers on a master services agreement](docs/images/prepare.png)
 
@@ -60,15 +60,19 @@ For documents that need more than an email link, ask a signer for an access code
 
 ### Follow every envelope
 
-The dashboard shows each document as a card with its first page, its status (draft, sent, completed, declined, voided or expired) and who it waits on, with search and a status filter. Each envelope has its own signing deadline, from 3 to 90 days, which you can change while it is out, and automatic reminders every 1, 2, 3 or 7 days, on top of the reminder you can send by hand.
+The dashboard shows each document as a card with its first page, its status (draft, sent, completed, declined, voided or expired) and who it waits on, with search and a status filter. Each envelope has its own signing deadline, from 3 to 90 days, which you can change while it is out, and automatic reminders every 1, 2, 3 or 7 days, on top of the reminder you can send by hand. If a signer's email address was wrong, correct it after sending: the old link stops working and the new address gets a fresh invitation. A finished envelope can be copied into a new draft with the same document, signers and fields.
 
-![The dashboard: six documents as cards, with drafts, a sent offer letter, an NDA one of two signed, and completed agreements](docs/images/dashboard.png)
+![The dashboard: the Mine and Everyone's switch, and six documents as cards, with drafts, a sent offer letter, an NDA one of two signed, and completed agreements](docs/images/dashboard.png)
 
-![A sent NDA: its deadline, reminders and Save as template, the two signers, and the timeline](docs/images/envelope.png)
+![A sent NDA: Void, Send reminder, Copy to new draft and Export audit trail, its deadline, reminders and Save as template, the two signers with Change for the one still to sign, and the timeline](docs/images/envelope.png)
 
 ### Templates for the documents you send every week
 
-Open any envelope and choose Save as template. The template keeps the document, the fields and the signing order, with roles instead of names. Using it asks who signs this time and opens a draft ready to send.
+Open any envelope and choose Save as template. The template keeps the document, the fields and the signing order, with roles instead of names. Using it asks who signs this time and opens a draft ready to send. Send to many takes a CSV of names and addresses and sends one envelope per row.
+
+### Send from your other apps
+
+Your own apps can send documents through SignuDoc's API. An administrator makes a key under Settings, and one call creates an envelope from a PDF with its signers and fields, and sends it. Signed webhooks tell your app when an envelope is sent, viewed, signed, completed, declined, voided or expires. Embedded signing shows the signing page inside your own site, for the sites an administrator allows. The [API guide](docs/api.md) has the details, and `/api/v1/openapi.json` on your install describes every endpoint.
 
 ### Sealed, certified, and checkable by anyone
 
@@ -86,6 +90,17 @@ Signers see your organization, not SignuDoc. Give the install your name, logo an
 
 The first account is the administrator, and you can make more. Choose who may create an account: people at your email domains, nobody, or anyone. People who only sign never need one. Set how long finished documents are kept, and answer a signer who asks for their data with a built-in export or erasure tool.
 
+Administrators see every member's sent and finished envelopes in an "Everyone's" view of the dashboard, and can delete a finished one: it is deleted 14 days later, after the sender has been emailed, and any administrator can cancel in between. Drafts stay private to the person writing them.
+
+### Sign-in security, backups and audits
+
+- **Single sign-on** over OpenID Connect, with Okta, Microsoft Entra ID, Google Workspace and others, and password sign-in turned off if you want.
+- **Two-step sign-in** with an authenticator app and backup codes, which administrators can require of everyone who signs in with a password. Single sign-on relies on your identity provider's own check instead.
+- **Session limits and lockout**: sign people out after a time without use, and stop sign-in for an address after ten wrong passwords.
+- **A site audit trail** of sign-ins, role changes, deletions and settings, also written to the function logs as JSON so a Vercel log drain can deliver it to your SIEM.
+- **Daily backups** of the database and files to a second private Blob store, with a script that restores them. See [Backup and restore](docs/backup-and-restore.md).
+- **A SOC 2 pack** for organizations that put their install in an audit: a control map, vendor duties, questionnaire answers and sample policies, in [docs/soc2](docs/soc2/README.md).
+
 ### On your phone
 
 SignuDoc works on small screens as well as large ones: check on your documents from your phone, and signers sign from theirs.
@@ -99,7 +114,7 @@ SignuDoc works on small screens as well as large ones: check on your documents f
 DocuSign does more, and charges for it per user. SignuDoc does the everyday signing loop well, and it's yours. DocuSign's plans are as [DocuSign listed them](https://ecom.docusign.com/plans-and-pricing/esignature) in November 2026, for the US.
 
 <p align="center">
-  <img src="docs/images/compare.png" alt="SignuDoc and DocuSign eSignature side by side, each with a green check for: signing without an account; signing order and copy recipients; signature, initials, date, text and checkbox fields; dropdown and radio button fields (on DocuSign: Business Pro, $45 a seat); reusable templates; deadlines and automatic reminders; your own logo and brand color (on DocuSign: from Standard, $30 a seat); accounts for your whole team (on DocuSign: from Standard); consent to electronic records; audit trail and certificate of completion; a tamper-evident seal on the finished PDF; and working on a phone. To tick every box on DocuSign you need Business Pro at $45 per user a month.">
+  <img src="docs/images/compare.png" alt="SignuDoc and DocuSign eSignature side by side, each with a green check for: signing without an account; signing order and copy recipients; signature, initials, date, name, text and checkbox fields; dropdown and radio button fields (on DocuSign: Business Pro, $45 a seat); reusable templates; deadlines and automatic reminders; your own logo and brand color (on DocuSign: from Standard, $30 a seat); accounts for your whole team (on DocuSign: from Standard); consent to electronic records; audit trail and certificate of completion; a tamper-evident seal on the finished PDF; working on a phone; two-step sign-in; and single sign-on (on DocuSign: Enhanced, priced by sales). To tick every box on DocuSign you need Enhanced; Business Pro, at $45 per user a month, ticks all but single sign-on.">
 </p>
 
 <p align="center">
@@ -122,33 +137,34 @@ DocuSign does more, and charges for it per user. SignuDoc does the everyday sign
 |                                              | SignuDoc                                                                                                                    | DocuSign eSignature                                                          |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | **Signing without an account**               | ✅                                                                                                                          | ✅                                                                           |
-| **Signing order**                            | ✅ in order, up to 10 signers                                                                                               | ✅ in order, at the same time, or mixed                                      |
+| **Signing order**                            | ✅ in order, at the same time, or mixed, up to 25 signers                                                                   | ✅ in order, at the same time, or mixed                                      |
 | **People who only get a copy**               | ✅                                                                                                                          | ✅ and more roles: approvers, editors, in-person signers                     |
 | **Field types**                              | ✅ signature, initials, date, name, text, number, checkbox, dropdown, radio, each required or optional                      | ✅ more types; dropdown, radio and signer attachments need Business Pro      |
 | **Templates**                                | ✅                                                                                                                          | ✅ from Personal, shared from Standard                                       |
+| **Send one template to many from a CSV**     | ✅ one envelope per row, up to 200 a batch                                                                                  | ✅ bulk send on Business Pro                                                 |
 | **Deadlines and automatic reminders**        | ✅                                                                                                                          | ✅                                                                           |
 | **Access code and emailed one-time code**    | ✅                                                                                                                          | ✅ plus SMS, phone, knowledge-based questions and ID checks, as paid add-ons |
 | **Consent to electronic records**            | ✅ versioned, recorded in the audit trail                                                                                   | ✅                                                                           |
 | **Sealed PDF and certificate of completion** | ✅ PAdES seal, self-signed by default or your own trusted certificate, long-term validation (B-LTA) with a timestamp server | ✅ seal trusted by PDF readers                                               |
-| **Audit trail**                              | ✅ hash-chained                                                                                                             | ✅                                                                           |
+| **Audit trail**                              | ✅ hash-chained, and sent to your SIEM through a log drain                                                                  | ✅                                                                           |
 | **Checking a signed copy**                   | ✅ the seal in a PDF reader, and a public Verify page on your own site                                                      | ✅ the seal in a PDF reader                                                  |
 | **Retention rules and signer data requests** | ✅ built in                                                                                                                 | ✅                                                                           |
 | **Phones**                                   | ✅ in the browser                                                                                                           | ✅ native iPhone and Android apps                                            |
+| **Two-step sign-in**                         | ✅ authenticator app, and administrators can require it                                                                     | ✅                                                                           |
+| **Single sign-on**                           | ✅ OpenID Connect, in every install                                                                                         | ✅ SAML, on Enhanced, priced by sales                                        |
+| **API and webhooks**                         | ✅ an API with keys, signed webhooks, and signing inside your own site, in every install                                    | ✅ API plans from $50 a month                                                |
 
 ### Where DocuSign does more
 
-|                                                         | SignuDoc                                                          | DocuSign eSignature                                   |
-| ------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| **More than one document per envelope, and Word files** | — PDF only, one per envelope                                      | ✅                                                    |
-| **Signing at the same time**                            | — in order only                                                   | ✅                                                    |
-| **Bulk send, web forms, payments**                      | —                                                                 | ✅ on Business Pro                                    |
-| **API and webhooks**                                    | — not yet                                                         | ✅ API plans from $50 a month                         |
-| **Integrations**                                        | —                                                                 | ✅ 1,000+, including Salesforce, Microsoft and Google |
-| **Languages**                                           | — signing pages in English                                        | ✅ signing in 44 languages                            |
-| **Single sign-on**                                      | — email and password                                              | ✅ SAML SSO on Enhanced                               |
-| **Advanced and qualified signatures (eIDAS)**           | With a provider you add: eID Easy or a CSC remote signing service | ✅                                                    |
-| **HIPAA, 21 CFR Part 11, certifications**               | Part 11 mode; you validate                                        | ✅ on Enhanced or as add-ons                          |
-| **Support**                                             | GitHub issues                                                     | ✅ 24/7 on Enhanced                                   |
+|                                                         | SignuDoc                                                            | DocuSign eSignature                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------- |
+| **More than one document per envelope, and Word files** | — PDF only, one per envelope                                        | ✅                                                    |
+| **Web forms, payments**                                 | —                                                                   | ✅ on Business Pro                                    |
+| **Integrations**                                        | — none built in; connect your own apps through the API and webhooks | ✅ 1,000+, including Salesforce, Microsoft and Google |
+| **Languages**                                           | — signing pages in English                                          | ✅ signing in 44 languages                            |
+| **Advanced and qualified signatures (eIDAS)**           | With a provider you add: eID Easy or a CSC remote signing service   | ✅                                                    |
+| **HIPAA, 21 CFR Part 11, certifications**               | Part 11 mode and a SOC 2 pack; you validate and get audited         | ✅ on Enhanced or as add-ons                          |
+| **Support**                                             | GitHub issues                                                       | ✅ 24/7 on Enhanced                                   |
 
 If your agreements run through Salesforce, need SMS checks or ID document checks, or go out by the thousand in bulk, DocuSign earns its price. If you want to send everyday agreements, keep the evidence, and own the whole thing, SignuDoc is built for you.
 
@@ -179,6 +195,8 @@ Each free plan has its own monthly allowance, and the smallest one sets the limi
 | **Email**, on [Resend](https://resend.com/pricing)                                 | 3,000 emails, and no more than 100 a day    | 600 two-signer documents a month, and 20 in one day. Each takes five emails: two invitations and three finished copies. Reminders and one-time codes are emails too.                                                       |
 | **Database**, on [Neon](https://neon.com/faqs/free-plan-limits-and-quotas)         | 1 GB and 100 compute hours                  | About 400 hours a month with the database awake. It sleeps when nobody is using the site.                                                                                                                                  |
 | **Hosting**, on Vercel Hobby                                                       | More than the rows above will use           | Any number of people. Vercel [limits Hobby to personal, non-commercial use](https://vercel.com/docs/limits/fair-use-guidelines).                                                                                           |
+
+Daily backups are off unless you turn them on. On Vercel Hobby a backup store in the same account shares the same free Blob storage. It holds about as much as the install's own files, plus copies of the database, so turning backups on leaves room for fewer than half as many finished documents.
 
 None of these plans bills you for going over. It stops instead: files cannot be read, email is not sent, or the database pauses. The monthly allowances come back when the month turns over. The two 1 GB limits do not, because stored files and database rows stay until they are deleted: make room by deleting old documents, or by setting how long finished documents are kept under Settings, Organization. Better still, move up before you reach a limit, not after.
 
@@ -222,8 +240,8 @@ Files stay on disk and emails are written to `.data/outbox` instead of being sen
 
 ## Built on Vercel
 
-- **Vercel-native from end to end.** Next.js 16 on Vercel Functions, Neon Postgres and Resend from the Vercel Marketplace, private Vercel Blob storage with direct browser uploads, a daily Vercel cron job for reminders and cleanup, and optional [Vercel BotID](https://vercel.com/docs/botid).
-- **Secure by default.** Private file storage with no public URLs, a strict Content Security Policy, rate limits kept in Postgres, signing links that are hashed at rest, and a setup page that only the first visitor, or the holder of a `SETUP_TOKEN`, can use.
+- **Vercel-native from end to end.** Next.js 16 on Vercel Functions, Neon Postgres and Resend from the Vercel Marketplace, private Vercel Blob storage with direct browser uploads, daily Vercel cron jobs for reminders, cleanup, backups and webhook retries, and optional [Vercel BotID](https://vercel.com/docs/botid).
+- **Secure by default.** Private file storage with no public URLs, a strict Content Security Policy, rate limits kept in Postgres, signing links that are hashed at rest, sign-in lockout, and a setup page that only the first visitor, or the holder of a `SETUP_TOKEN`, can use.
 - **Tested.** Unit tests, database tests against a real Postgres, and a browser test that sets up a fresh install, sends a document and signs it, run on every pull request.
 
 ## Using SignuDoc for real agreements
@@ -244,7 +262,11 @@ Your install carries your organization's name, and your organization is responsi
 
 ## Learn more
 
-- [Self-hosting guide](docs/self-hosting.md): deploying, first-run setup, what it costs, your own domain, updates, the EU, the seal, cleanup, rate limits, bot protection and every optional setting.
+- [Self-hosting guide](docs/self-hosting.md): deploying, first-run setup, what it costs, your own domain, updates, sign-in security and single sign-on, the EU, the seal, cleanup, rate limits, bot protection and every optional setting.
+- [API guide](docs/api.md): API keys, the `/api/v1` endpoints, webhooks and embedded signing.
+- [Backup and restore](docs/backup-and-restore.md): daily backups to a second Blob store, and restoring one.
+- [SOC 2 pack](docs/soc2/README.md) and [Part 11 validation pack](docs/part11/README.md): starting documents for an audit or a validation.
+- [Deploying with an AI agent](docs/deploy-with-an-agent.md): every screen of the deploy, for an agent that uses your browser.
 - [Development](docs/development.md): running SignuDoc locally, storage, the database, email, tests and the code's layout.
 - [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).
 

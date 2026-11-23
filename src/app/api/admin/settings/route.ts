@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAdminSession } from "@/lib/auth/admin";
+import { CUSTOM_DISCLOSURE_NOTICE_VERSION } from "@/lib/consent-disclosure-notice";
 import { getDb, withTransaction } from "@/lib/db/connection";
 import {
   diffSettings,
@@ -69,7 +70,19 @@ export async function PUT(request: Request) {
             actorUserId: session.user.id,
             event: "settings_changed",
             ipAddress: getClientIpAddress(request.headers),
-            metadata: { changes },
+            metadata: {
+              changes,
+              // Saving their own disclosure needs the administrator to agree
+              // to the notice first, and the record says which notice.
+              ...(changes.consentDisclosure && after.consentDisclosure !== null
+                ? {
+                    consentDisclosureNotice: {
+                      agreed: true,
+                      noticeVersion: CUSTOM_DISCLOSURE_NOTICE_VERSION,
+                    },
+                  }
+                : {}),
+            },
             userAgent: getRequestUserAgent(request.headers),
           },
           tx,

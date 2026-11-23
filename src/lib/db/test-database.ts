@@ -60,6 +60,41 @@ export async function openTestDatabase(): Promise<pg.Pool> {
   return new pg.Pool({ connectionString, max: 12 });
 }
 
+/**
+ * Resolves once another session is waiting on a lock that `holder` has,
+ * so a test can check what that session holds while it waits. Fails if
+ * none does within about five seconds.
+ */
+export async function waitUntilBlockedBy(
+  database: pg.Pool,
+  holder: pg.PoolClient,
+): Promise<void> {
+  const self = await holder.query<{ pid: number }>(
+    "select pg_backend_pid() as pid",
+  );
+  const holderPid = self.rows[0]?.pid;
+
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const waiting = await database.query(
+      `
+        select 1
+        from pg_stat_activity
+        where $1::integer = any(pg_blocking_pids(pid))
+        limit 1
+      `,
+      [holderPid],
+    );
+
+    if (waiting.rowCount) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Nothing started waiting on the held lock.");
+}
+
 type QueryFunction = (text: unknown, values?: unknown[]) => unknown;
 
 /**

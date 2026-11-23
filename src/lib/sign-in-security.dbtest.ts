@@ -9,6 +9,7 @@ import type { createAppAuth as CreateAppAuth } from "./auth/server.ts";
 import { replaceDbPoolForTests } from "./db/connection.ts";
 import { openTestDatabase } from "./db/test-database.ts";
 import { clearRateLimitStoreForTests } from "./security/rate-limit.ts";
+import { UNKNOWN_ADDRESS_FAILURES_RECORDED_PER_HOUR } from "./auth/sign-in-events.ts";
 import {
   listSystemAuditEvents,
   verifySystemAuditChain,
@@ -246,6 +247,33 @@ test("a password sign-in is recorded, with where it came from", async () => {
   });
 });
 
+test("a password reset is recorded, with where it came from", async () => {
+  const userId = await createVerifiedUser("pat@acme.com");
+  const token = randomUUID();
+
+  // The token the emailed reset link carries, as Better Auth stores it.
+  await database.query(
+    `insert into verification (id, identifier, value, "expiresAt") values ($1, $2, $3, now() + interval '1 hour')`,
+    [randomUUID(), `reset-password:${token}`, userId],
+  );
+
+  const reset = await call(
+    "/reset-password",
+    { newPassword: "a different long passphrase", token },
+    new Map(),
+    "198.51.100.23",
+  );
+
+  assert.equal(reset.status, 200, JSON.stringify(reset.payload));
+
+  const [event] = await events("password_reset");
+
+  assert.equal(event?.actorUserId, userId);
+  assert.equal(event?.targetUserId, userId);
+  assert.equal(event?.ipAddress, "198.51.100.23");
+  assert.equal(event?.userAgent, "sign-in-security dbtest");
+});
+
 test("ten wrong passwords stop sign-in for the address, even with the right one", async () => {
   await createVerifiedUser("pat@acme.com");
 
@@ -277,6 +305,27 @@ test("an address with no account is stopped the same way", async () => {
 
   assert.equal(locked.status, 429);
   assert.equal(locked.payload?.code, "SIGN_IN_LOCKED");
+});
+
+test("tries at made-up addresses from one place are recorded only up to an hourly number", async () => {
+  for (
+    let attempt = 0;
+    attempt < UNKNOWN_ADDRESS_FAILURES_RECORDED_PER_HOUR + 5;
+    attempt += 1
+  ) {
+    await signIn(
+      `nobody-${String(attempt)}@acme.com`,
+      "not the right password!!",
+    );
+  }
+
+  const failures = await events("sign_in_failed");
+
+  assert.ok(failures.length > 0);
+  assert.ok(
+    failures.length <= UNKNOWN_ADDRESS_FAILURES_RECORDED_PER_HOUR,
+    String(failures.length),
+  );
 });
 
 test("a sign-in that works forgets the wrong passwords before it", async () => {

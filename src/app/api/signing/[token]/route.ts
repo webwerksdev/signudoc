@@ -12,7 +12,7 @@ import {
 } from "@/lib/signing";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import {
@@ -28,7 +28,7 @@ type SigningRouteContext = {
 
 export async function GET(request: Request, context: SigningRouteContext) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "signing_token_read",
     key: buildRateLimitKey([
       "signing-read",

@@ -155,6 +155,13 @@ export function TemplatesShell({
                   </button>
                   <ShellButton
                     className="min-h-11"
+                    href={`/templates/${template.id}/send-many`}
+                    variant="secondary"
+                  >
+                    Send to many
+                  </ShellButton>
+                  <ShellButton
+                    className="min-h-11"
                     href={`/templates/${template.id}/use`}
                   >
                     Use template

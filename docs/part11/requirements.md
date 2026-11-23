@@ -21,17 +21,17 @@ Document `[ID]`, version `[1.0]`, approved by `[name, role, date]`.
 
 ## Signers and signatures
 
-| ID     | Requirement                                                                                                                                              | Part 11        |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| SIG-01 | Each signer signs with their own account, which belongs to one person and is not reused.                                                                 | 11.100(a)      |
-| SIG-02 | A record is not sent unless an administrator has confirmed each signer's identity and recorded how.                                                      | 11.100(b)      |
-| SIG-03 | A signer whose identity confirmation is taken back, or whose email is no longer confirmed, cannot sign.                                                  | 11.100(b)      |
-| SIG-04 | The signer gives two components, email address and password, to open the record and again at each signature.                                             | 11.200(a)(1)   |
-| SIG-05 | Each signature shows the signer's printed name, the date and time (UTC), and its meaning. The same information appears in the certificate.               | 11.50(a), (b)  |
-| SIG-06 | The signer confirms the meaning of their signature before signing.                                                                                       | 11.50(a)(3)    |
-| SIG-07 | The signature is linked to its record, and the seal makes it impossible to copy onto another record undetected.                                          | 11.70          |
-| SIG-08 | Passwords are at least 15 characters long and are checked against known breached passwords.                                                              | 11.300(a), (b) |
-| SIG-09 | After five wrong passwords in a row while signing, the account can no longer sign until an administrator unlocks it, and every administrator is emailed. | 11.300(d)      |
+| ID     | Requirement                                                                                                                                                                   | Part 11        |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| SIG-01 | Each signer signs with their own account, which belongs to one person and is not reused.                                                                                      | 11.100(a)      |
+| SIG-02 | A record is not sent unless an administrator has confirmed each signer's identity and recorded how, and each signer is named as the person confirmed.                         | 11.100(b)      |
+| SIG-03 | A signer whose identity confirmation is taken back, whose account's name or email address changed since it was confirmed, or whose email is no longer confirmed, cannot sign. | 11.100(b)      |
+| SIG-04 | The signer gives two components, email address and password, to open the record and again at each signature.                                                                  | 11.200(a)(1)   |
+| SIG-05 | Each signature shows the signer's printed name, the date and time (UTC), and its meaning. The same information appears in the certificate.                                    | 11.50(a), (b)  |
+| SIG-06 | The signer confirms the meaning of their signature before signing.                                                                                                            | 11.50(a)(3)    |
+| SIG-07 | The signature is linked to its record, and the seal makes it impossible to copy onto another record undetected.                                                               | 11.70          |
+| SIG-08 | Passwords are at least 15 characters long and are checked against known breached passwords.                                                                                   | 11.300(a), (b) |
+| SIG-09 | After five wrong passwords in a row while signing, the account can no longer sign until an administrator unlocks it, and every administrator is emailed.                      | 11.300(d)      |
 
 ## Procedural requirements (met by your procedures, not by the software)
 

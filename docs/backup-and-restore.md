@@ -59,6 +59,14 @@ You need a computer with Node.js 24 and a copy of this repository at the same ve
 
 What a restore brings back: everything in the database at the time of the backup, and every file as of the last run. A document sent after the last backup is not in it. The hash chains in both audit trails come back exactly as they were, so they still verify.
 
+What a restore does not bring back: anything that lets someone in. A backup holds sign-ins and links as they were when it was made, including ones that were signed out, used or replaced since, so the restore ends them all:
+
+- Everyone signs in again, and password reset links and emailed codes from before the restore stop working.
+- Every signing link stops working. For each envelope still out for signature, send a reminder from its page: that emails the signer a new link. The usual wait between reminders starts over with the restore, so you can send one at once. Embedded envelopes get no reminders: the app that shows them asks for a new link through the API's [embed-link endpoint](api.md#embedded-signing).
+- A signature that was under way at a signing provider has to be started again.
+
+Passwords and API keys come back as they were at the time of the backup. If someone changed a password, or an administrator revoked an API key, after the backup was made, do it again. If the restore follows a break-in, also change `BETTER_AUTH_SECRET` (everyone using two-step sign-in then sets it up again, see step 4).
+
 ## In a security review
 
 - **Backup frequency:** daily, at 08:00 UTC.

@@ -2,10 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireVerifiedSenderSession } from "@/lib/auth/route-session";
 import { getDb } from "@/lib/db/connection";
-import {
-  deleteDraftEnvelope,
-  EnvelopeMutationError,
-} from "@/lib/envelopes";
+import { deleteDraftEnvelope, EnvelopeMutationError } from "@/lib/envelopes";
 import { logRouteError } from "@/lib/security/logging";
 import { getClientIpAddress, getRequestPathname } from "@/lib/security/request";
 

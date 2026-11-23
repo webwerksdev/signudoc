@@ -1,4 +1,5 @@
 import { SIGNUDOC_NAME } from "../branding.ts";
+import { truncateToWholeCharacters } from "../text-truncate.ts";
 
 // Which addresses email is sent from and replied to.
 //
@@ -50,11 +51,13 @@ export function isResendTestSender(value: string): boolean {
 // A display name goes into an email header, so anything with a meaning there
 // (quotes, angle brackets, separators, line breaks) is dropped.
 function cleanDisplayName(value: string | null): string {
-  const cleaned = (value ?? "")
-    .replace(/[\u0000-\u001f\u007f"<>()[\]\\,;:@]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
+  const cleaned = truncateToWholeCharacters(
+    (value ?? "")
+      .replace(/[\u0000-\u001f\u007f"<>()[\]\\,;:@]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+    80,
+  ).trimEnd();
 
   return cleaned || SIGNUDOC_NAME;
 }

@@ -1587,12 +1587,11 @@ async function declineRacingAnotherCorrection(
 }
 
 test("a decline whose certificate missed another signer's correction is refused", async () => {
-  // The correction lands after the decline has read the audit trail for
-  // its certificate, and before it takes the envelope lock.
-  await declineRacingAnotherCorrection(
-    (text) =>
-      text.includes("FROM audit_events") &&
-      text.includes("ORDER BY sequence ASC NULLS FIRST"),
+  // The correction lands just before the decline takes the envelope lock.
+  // The audit trail for its certificate is read under that lock, so it has
+  // the correction; the signers it read before do not, so it starts again.
+  await declineRacingAnotherCorrection((text) =>
+    text.includes('s.embed_origin AS origin, k.name AS "apiKeyName"'),
   );
 });
 

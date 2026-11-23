@@ -44,6 +44,11 @@ type ShellButtonProps = {
   className?: string;
   disabled?: boolean;
   href?: string;
+  /**
+   * With `href`: open it in a new tab, as a plain link rather than a page
+   * of this app (a file served by an API route, say).
+   */
+  inNewTab?: boolean;
   loading?: boolean;
   onClick?: () => void;
   type?: "button" | "submit";
@@ -135,6 +140,7 @@ export function ShellButton({
   className = "",
   disabled = false,
   href,
+  inNewTab = false,
   loading = false,
   onClick,
   type = "button",
@@ -156,6 +162,16 @@ export function ShellButton({
       {children}
     </>
   );
+
+  if (href && inNewTab && !disabled && !loading) {
+    return (
+      <Button asChild className={shellButtonClassName} variant={buttonVariant}>
+        <a href={href} rel="noopener noreferrer" target="_blank">
+          {children}
+        </a>
+      </Button>
+    );
+  }
 
   if (href && !disabled && !loading) {
     return (

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getAuthSessionFromHeaders } from "@/lib/auth/server";
 import { AccountMutationError, requestAccountClosure } from "@/lib/account";
 import { getDb } from "@/lib/db/connection";
+import { getRequestClient } from "@/lib/security/request";
 
 export async function POST(request: Request) {
   const session = await getAuthSessionFromHeaders(request.headers);
@@ -23,6 +24,7 @@ export async function POST(request: Request) {
         confirmation: String(payload?.confirmation ?? ""),
       },
       {
+        client: getRequestClient(request.headers),
         database: getDb(),
       },
     );

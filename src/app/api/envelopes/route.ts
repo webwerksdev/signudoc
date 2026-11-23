@@ -26,6 +26,7 @@ import {
   type StorageService,
 } from "@/lib/services/storage";
 import { isPendingUploadKey } from "@/lib/services/storage-keys";
+import { MAX_REQUEST_BODY_BYTES } from "@/lib/types/domain";
 
 export async function POST(request: Request) {
   const sessionResult = await requireVerifiedSenderSession(request);
@@ -120,9 +121,27 @@ function invalidRequest(message = "Invalid envelope request.") {
 async function readFormRequest(
   request: Request,
 ): Promise<DraftRequest | Response> {
+  // A body over the limit is cut short before it gets here, so it could
+  // only fail to parse. Say why instead.
+  const declaredLength = Number(request.headers.get("content-length"));
+
+  if (declaredLength > MAX_REQUEST_BODY_BYTES) {
+    return NextResponse.json(
+      { error: "This file exceeds the 20 MB limit." },
+      { status: 413 },
+    );
+  }
+
   const formData = await request.formData().catch(() => null);
-  const parsedTitle = envelopeTitleSchema.safeParse(formData?.get("title"));
-  const uploadedFile = formData?.get("file");
+
+  if (!formData) {
+    return invalidRequest(
+      "The upload could not be read. Choose the PDF again and retry.",
+    );
+  }
+
+  const parsedTitle = envelopeTitleSchema.safeParse(formData.get("title"));
+  const uploadedFile = formData.get("file");
 
   if (!parsedTitle.success) {
     return invalidRequest(parsedTitle.error.issues[0]?.message);

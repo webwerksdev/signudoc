@@ -210,6 +210,44 @@ test("a template keeps the document, the fields and the order, and no one's name
   );
 });
 
+test("a meaning given for a signer is kept on the draft made from a template", async () => {
+  // Part 11 installs need one for each signer before sending, and the API
+  // gives them here so it can send the draft at once.
+  const userId = await createUser();
+  const { envelopeId: originalId } = await createPreparedDraft(userId);
+  const template = await saveEnvelopeAsTemplate(
+    userId,
+    originalId,
+    { name: "Lease" },
+    { database, storageService },
+  );
+  const made = await createDraftFromTemplate(
+    userId,
+    template.id,
+    {
+      signers: [
+        {
+          email: "tess@example.test",
+          name: "Tess Tenant",
+          signatureMeaning: "approval",
+        },
+        { email: "lou@example.test", name: "Lou Landlord" },
+      ],
+      title: "Lease for 4 Mill Lane",
+    },
+    { database, storageService },
+  );
+  const saved = await database.query<{ signature_meaning: string | null }>(
+    `select signature_meaning from signers where envelope_id = $1 order by sign_order`,
+    [made.envelopeId],
+  );
+
+  assert.deepEqual(
+    saved.rows.map((row) => row.signature_meaning),
+    ["approval", null],
+  );
+});
+
 test("a draft made from a template has the fields on the people named for it", async () => {
   const userId = await createUser();
   const { envelopeId: originalId } = await createPreparedDraft(userId);

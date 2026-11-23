@@ -17,7 +17,11 @@ import {
   replaceDraftEnvelopeFields,
   replaceDraftEnvelopeSigners,
 } from "./envelopes.ts";
-import { countAnswerableFields } from "./field-choices.ts";
+import {
+  countAnswerableFields,
+  describeChoiceFieldProblem,
+  findChoiceFieldProblem,
+} from "./field-choices.ts";
 import { fieldPlacementListSchema } from "./schemas/field.ts";
 import {
   saveTemplateSchema,
@@ -26,6 +30,7 @@ import {
   type TemplateRole,
 } from "./schemas/template.ts";
 import { buildTemplatePdfKey } from "./services/storage-keys.ts";
+import { normalizeSigningSteps } from "./signing-steps.ts";
 import {
   createStorageService,
   StorageObjectNotFoundError,
@@ -218,11 +223,84 @@ export async function listTemplatesForUser(
   }));
 }
 
-export async function getUseTemplateDataForUser(
+export type TemplateForBulkSend = UseTemplateData & {
+  fields: unknown;
+};
+
+/**
+ * Whether this template can be sent as it stands: someone has to sign,
+ * every signer role needs a signature field, an approver role has no
+ * fields, and choice fields must be finished. Saved from a draft
+ * that was still being prepared, it is kept, but it cannot go out.
+ */
+export function describeUnsendableTemplate(
+  roles: readonly TemplateRole[],
+  fields: unknown,
+): string | null {
+  if (roles.length === 0) {
+    return "Add signers and place fields before sending this envelope.";
+  }
+
+  const parsed = fieldPlacementListSchema.safeParse(fields);
+
+  if (!parsed.success) {
+    return UNUSABLE_TEMPLATE_MESSAGE;
+  }
+
+  if (parsed.data.length === 0) {
+    return "Add signers and place fields before sending this envelope.";
+  }
+
+  const roleIds = new Set(roles.map((role) => role.id));
+
+  if (parsed.data.some((field) => !roleIds.has(field.signerId))) {
+    return UNUSABLE_TEMPLATE_MESSAGE;
+  }
+
+  if (!roles.some((role) => role.kind !== "approver")) {
+    return "Add at least one signer. Approvers approve or reject, so someone else has to sign.";
+  }
+
+  const approverWithFields = roles.find(
+    (role) =>
+      role.kind === "approver" &&
+      parsed.data.some((field) => field.signerId === role.id),
+  );
+
+  if (approverWithFields) {
+    return `${approverWithFields.name} is an approver, and approvers have no fields. Remove their fields, or make them a signer.`;
+  }
+
+  const missing = roles.find(
+    (role) =>
+      role.kind !== "approver" &&
+      !parsed.data.some(
+        (field) => field.signerId === role.id && field.type === "signature",
+      ),
+  );
+
+  if (missing) {
+    return `Every signer must have at least one Signature field before sending. ${missing.name} is missing one.`;
+  }
+
+  const choiceProblem = findChoiceFieldProblem(parsed.data);
+
+  if (!choiceProblem) {
+    return null;
+  }
+
+  return describeChoiceFieldProblem(
+    choiceProblem,
+    roles.find((role) => role.id === choiceProblem.signerId)?.name ??
+      "a signer",
+  );
+}
+
+export async function getTemplateForBulkSend(
   userId: string,
   templateId: string,
   database: DbExecutor = getDb(),
-): Promise<UseTemplateData | null> {
+): Promise<TemplateForBulkSend | null> {
   const row = await getTemplateRow(userId, templateId, database);
 
   if (!row) {
@@ -237,10 +315,31 @@ export async function getUseTemplateDataForUser(
 
   return {
     fieldCountLabel: countLabel(countFields(row.fields), "field"),
+    fields: row.fields,
     id: row.id,
     name: row.name,
     pageCountLabel: countLabel(row.pageCount, "page"),
     roles: roles.data,
+  };
+}
+
+export async function getUseTemplateDataForUser(
+  userId: string,
+  templateId: string,
+  database: DbExecutor = getDb(),
+): Promise<UseTemplateData | null> {
+  const template = await getTemplateForBulkSend(userId, templateId, database);
+
+  if (!template) {
+    return null;
+  }
+
+  return {
+    fieldCountLabel: template.fieldCountLabel,
+    id: template.id,
+    name: template.name,
+    pageCountLabel: template.pageCountLabel,
+    roles: template.roles,
   };
 }
 
@@ -290,8 +389,17 @@ export async function saveEnvelopeAsTemplate(
     );
   }
 
+  // Each role keeps its signer's step, so roles that signed at the same
+  // time still do when the template is used, and whether they sign or
+  // approve.
+  const steps = normalizeSigningSteps(signers.map((signer) => signer.step));
   const roles = templateRolesSchema.parse(
-    roleNames.map((name) => ({ id: randomUUID(), name })),
+    roleNames.map((name, index) => ({
+      id: randomUUID(),
+      kind: signers[index]?.role ?? "signer",
+      name,
+      step: steps[index],
+    })),
   );
   const roleIdBySignerId = new Map(
     signers.map((signer, index) => [signer.id, roles[index]!.id] as const),
@@ -470,10 +578,21 @@ export async function createDraftFromTemplate(
   const envelopeId = draft.envelope.id;
 
   try {
+    const roleSteps = roles.data.every((role) => role.step !== undefined)
+      ? roles.data.map((role) => role.step)
+      : null;
     const saved = await replaceDraftEnvelopeSigners(
       userId,
       envelopeId,
-      { signers: parsedInput.signers },
+      {
+        // The roles' steps, when the template has them. One saved before
+        // steps existed has none, and its people sign one after the other.
+        signers: parsedInput.signers.map((signer, index) => ({
+          ...signer,
+          role: roles.data[index]?.kind ?? "signer",
+          ...(roleSteps ? { signingStep: roleSteps[index] } : {}),
+        })),
+      },
       database,
     );
     const signerIdByOrder = new Map(

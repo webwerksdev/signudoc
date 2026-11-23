@@ -3,6 +3,12 @@ import { z } from "zod";
 import { normalizeBrandColor } from "./brand-color.ts";
 import { buildBrandLogoPath } from "./branding.ts";
 import { getDb, type DbExecutor } from "./db/connection.ts";
+import {
+  normalizeCustomDisclosure,
+  standardDisclosureTemplate,
+  toStoredCustomDisclosure,
+  validateCustomDisclosure,
+} from "./electronic-records-disclosure.ts";
 import { emailSchema } from "./schemas/common.ts";
 import {
   saveSettings,
@@ -16,6 +22,7 @@ import { parseEmailDomainList, SIGNUP_MODES } from "./signup-policy.ts";
 export type OrganizationSettingsField =
   | "allowedEmailDomains"
   | "brandColor"
+  | "consentDisclosure"
   | "organizationName"
   | "privacyUrl"
   | "retentionDays"
@@ -39,6 +46,10 @@ export type OrganizationSettingsView = {
   allowedEmailDomains: string;
   /** "#rrggbb", or empty for the default color. */
   brandColor: string;
+  /** The administrator's own disclosure, or empty for the built-in one. */
+  consentDisclosure: string;
+  /** The built-in disclosure as a template, to start a custom one from. */
+  defaultConsentDisclosure: string;
   hosted: boolean;
   /** Part 11 mode is on: the retention period cannot be set. */
   part11Mode: boolean;
@@ -68,6 +79,8 @@ export function toOrganizationSettingsView(
   return {
     allowedEmailDomains: settings.allowedEmailDomains.join(", "),
     brandColor: settings.brandColor ?? "",
+    consentDisclosure: settings.consentDisclosure ?? "",
+    defaultConsentDisclosure: standardDisclosureTemplate(),
     hosted: settings.hosted,
     logoUrl:
       settings.logoVersion === null
@@ -136,6 +149,12 @@ const optionalBrandColor = z.preprocess(
 const organizationSettingsSchema = z.object({
   allowedEmailDomains: z.string().max(4000).default(""),
   brandColor: optionalBrandColor.default(null),
+  // Left out means unchanged. The length is judged after tidying, below; this
+  // only keeps an absurd request from getting that far.
+  consentDisclosure: z.string().max(20_000).optional(),
+  // The administrator agreed to the notice about changing the disclosure.
+  // Needed only when the saved words change to words of their own.
+  consentDisclosureAcknowledged: z.boolean().optional(),
   organizationName: z.string().trim().min(1).max(120),
   privacyUrl: optionalWebUrl.default(null),
   retentionDays: z
@@ -154,6 +173,7 @@ const organizationSettingsSchema = z.object({
 const FIELD_MESSAGES: Record<OrganizationSettingsField, string> = {
   allowedEmailDomains: "Enter one or more domains, such as yourcompany.com",
   brandColor: "Enter a color as six letters and digits, such as #1a73e8",
+  consentDisclosure: "Enter the words signers should read, or leave this empty",
   organizationName: "Enter the name of your organization",
   privacyUrl: "Enter a full web address starting with https://",
   retentionDays: "Enter a number of days, 30 or more, or leave this empty",
@@ -189,11 +209,36 @@ function withoutLockedFields(
 
   if (current.hosted) {
     delete input.brandColor;
+    delete input.consentDisclosure;
     delete input.privacyUrl;
     delete input.termsUrl;
   }
 
   return input;
+}
+
+export const CONSENT_DISCLOSURE_NOTICE_REQUIRED =
+  'Read the notice about changing what signers agree to, and press "I agree", before saving your own words.';
+
+/**
+ * Whether a save puts the administrator's own words in place of what
+ * signers read now. Going back to the standard text, or saving the same
+ * words again, does not.
+ */
+export function changesToOwnDisclosure(
+  consentDisclosure: string | undefined,
+  current: Pick<ResolvedSettings, "consentDisclosure">,
+): boolean {
+  if (consentDisclosure === undefined) {
+    return false;
+  }
+
+  const next = toStoredCustomDisclosure(consentDisclosure);
+
+  return (
+    next !== null &&
+    next !== normalizeCustomDisclosure(current.consentDisclosure)
+  );
 }
 
 /**
@@ -246,6 +291,17 @@ export async function updateOrganizationSettings(
     fieldErrors.supportAddress = FIELD_MESSAGES.supportAddress;
   }
 
+  const disclosureProblem = validateCustomDisclosure(input.consentDisclosure);
+
+  if (disclosureProblem !== null) {
+    fieldErrors.consentDisclosure = disclosureProblem;
+  } else if (
+    changesToOwnDisclosure(input.consentDisclosure, current) &&
+    input.consentDisclosureAcknowledged !== true
+  ) {
+    fieldErrors.consentDisclosure = CONSENT_DISCLOSURE_NOTICE_REQUIRED;
+  }
+
   // Part 11 records are never deleted on a timer.
   if (current.part11Mode && input.retentionDays !== null) {
     fieldErrors.retentionDays =
@@ -266,6 +322,13 @@ export async function updateOrganizationSettings(
         ? {}
         : {
             brandColor: input.brandColor,
+            ...(input.consentDisclosure === undefined
+              ? {}
+              : {
+                  consentDisclosure: toStoredCustomDisclosure(
+                    input.consentDisclosure,
+                  ),
+                }),
             privacyUrl: input.privacyUrl,
             termsUrl: input.termsUrl,
           }),
@@ -283,6 +346,7 @@ export async function updateOrganizationSettings(
 const AUDITED_SETTINGS = [
   "allowedEmailDomains",
   "brandColor",
+  "consentDisclosure",
   "organizationName",
   "privacyUrl",
   "retentionDays",

@@ -235,6 +235,19 @@ export async function eraseSignerData(
     (row) => !erasedFromDrafts.stillDrafts.has(row.envelopeId),
   );
 
+  // A send-to-many batch keeps why a row failed, and that reason can name
+  // the signer (a Part 11 account problem does). Clear it for every
+  // envelope they are on, before finished ones are deleted and the row
+  // loses its link to them.
+  await database.query(
+    `
+      UPDATE bulk_send_batch_rows
+      SET reason = NULL
+      WHERE reason IS NOT NULL AND envelope_id = ANY($1::text[])
+    `,
+    [[...new Set(envelopes.map((row) => row.envelopeId))]],
+  );
+
   const deletedEnvelopes = await deleteEnvelopesAndFiles(
     [...new Set(finished.map((row) => row.envelopeId))],
     database,

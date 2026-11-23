@@ -15,10 +15,7 @@ export type PdfFieldRect = {
 };
 
 export type FieldResizeHandle =
-  | "bottom-left"
-  | "bottom-right"
-  | "top-left"
-  | "top-right";
+  "bottom-left" | "bottom-right" | "top-left" | "top-right";
 
 type RelativeFieldRect = {
   height: number;

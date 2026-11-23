@@ -17,6 +17,8 @@ export type RateLimitDecision = {
   count: number;
   /** Seconds until the current window ends. At least 1 when not allowed. */
   retryAfterSeconds: number;
+  /** Where this request was counted, for refundRateLimit. */
+  countedIn?: "database" | "memory";
 };
 
 type RateLimitInput = {
@@ -101,7 +103,10 @@ export function consumeRateLimitInMemory(
 
   memoryStore.set(input.key, entry);
 
-  return toDecision(entry.count, entry.expiresAt, input, now);
+  return {
+    ...toDecision(entry.count, entry.expiresAt, input, now),
+    countedIn: "memory",
+  };
 }
 
 function warnAboutFallback(error: unknown) {
@@ -159,11 +164,11 @@ export async function consumeRateLimit(
         values ($1, 1, $2::bigint + $3::bigint)
         on conflict (key) do update set
           count = case
-            when current.expires_at <= $2::bigint then 1
+            when current.expires_at <= $2::bigint or current.count <= 0 then 1
             else least(current.count + 1, 1000000)
           end,
           expires_at = case
-            when current.expires_at <= $2::bigint
+            when current.expires_at <= $2::bigint or current.count <= 0
               then $2::bigint + $3::bigint
             else current.expires_at
           end
@@ -181,7 +186,10 @@ export async function consumeRateLimit(
       void deleteExpiredRateLimits(executor, now).catch(() => undefined);
     }
 
-    return toDecision(row.count, Number(row.expires_at), input, now);
+    return {
+      ...toDecision(row.count, Number(row.expires_at), input, now),
+      countedIn: "database",
+    };
   } catch (error) {
     warnAboutFallback(error);
 
@@ -233,6 +241,49 @@ export async function peekRateLimit(
     count: entry.count,
     retryAfterSeconds: Math.max(1, Math.ceil((entry.expiresAt - now) / 1000)),
   };
+}
+
+/**
+ * Takes back one request counted by consumeRateLimit, for limits that
+ * count every attempt up front (so parallel ones cannot all pass a peek)
+ * but only mean to keep the ones that fail. A count that drops to nothing
+ * starts a new window with the next request, as if it had never been.
+ */
+export async function refundRateLimit(
+  key: string,
+  counted: Pick<RateLimitDecision, "countedIn">,
+  {
+    database,
+    now = Date.now(),
+  }: ConsumeRateLimitOptions & { now?: number } = {},
+): Promise<void> {
+  // Taken back where it was counted: a count kept in memory while the
+  // database could not be asked is not in the database, and the other way.
+  if (counted.countedIn === "memory") {
+    const entry = memoryStore.get(key);
+
+    if (entry && entry.count <= 1) {
+      memoryStore.delete(key);
+    } else if (entry && entry.expiresAt > now) {
+      entry.count -= 1;
+    }
+
+    return;
+  }
+
+  // One statement, so refunds that arrive together each take one off:
+  // the row's lock puts them in turn. A count of zero is left in place;
+  // consumeRateLimit treats it as no window at all. If the database cannot
+  // be asked now, the try stays counted: a limit that is too strict for a
+  // while is safer than one that forgets.
+  try {
+    await (database ?? getDb()).query(
+      "update public.rate_limits set count = greatest(count - 1, 0) where key = $1 and expires_at > $2",
+      [hashKey(key), now],
+    );
+  } catch (error) {
+    warnAboutFallback(error);
+  }
 }
 
 /** Forgets a limit's count, as after a sign-in that worked. */

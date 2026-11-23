@@ -14,7 +14,7 @@ import {
 } from "@/lib/signing";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import { getClientIpAddress } from "@/lib/security/request";
@@ -40,7 +40,7 @@ export async function POST(
   context: ProviderStartRouteContext,
 ) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "signing_submit",
     key: buildRateLimitKey([
       "signing-provider-start",

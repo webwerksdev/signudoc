@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 
 import { ChevronLeftIcon } from "@/components/layout/nav-items";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,8 @@ type CanvasShellProps = {
   nextHref?: string;
   nextLabel?: string;
   nextLoading?: boolean;
+  /** Runs before the Back link navigates; it can prevent the navigation. */
+  onBack?: (event: MouseEvent<HTMLAnchorElement>) => void;
   onNext?: () => void;
   stepLabel: string;
   title: string;
@@ -25,6 +27,7 @@ export function CanvasShell({
   nextHref,
   nextLabel,
   nextLoading = false,
+  onBack,
   onNext,
   stepLabel,
   title,
@@ -35,7 +38,11 @@ export function CanvasShell({
     <div className="min-h-screen bg-(--page)">
       <header className="sticky top-0 z-20 bg-[rgba(255,255,255,0.92)] shadow-[0_1px_0_rgba(28,29,43,0.06)] backdrop-blur-md">
         <div className="flex min-h-[4.5rem] items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <Link className="btn-quiet min-h-11 px-3.5" href={backHref}>
+          <Link
+            className="btn-quiet min-h-11 px-3.5"
+            href={backHref}
+            onClick={onBack}
+          >
             <ChevronLeftIcon aria-hidden="true" className="-ml-1 size-4" />
             {backLabel}
           </Link>

@@ -7,6 +7,7 @@ import {
   withTransaction,
 } from "./db/connection.ts";
 import { SIGNUDOC_NAME } from "./branding.ts";
+import { namesMatch } from "./name-match.ts";
 import { createEmailService, type EmailService } from "./services/email.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 import { getBranding, getSettings } from "./settings.ts";
@@ -54,6 +55,20 @@ export async function isPart11ModeOn(): Promise<boolean> {
   return (await getSettings()).part11Mode;
 }
 
+/**
+ * When an administrator confirmed who an account's holder is, as long as
+ * the account still has the name and email address they confirmed, or
+ * null. A confirmation is of a person: once the account's name or address
+ * changes it no longer says who signs with it. `u` is the "user" row.
+ */
+export const CURRENT_IDENTITY_VERIFIED_AT_SQL = `
+  CASE
+    WHEN u.identity_verified_name IS NOT DISTINCT FROM u.name
+      AND lower(u.identity_verified_email) = lower(u.email)
+    THEN u.identity_verified_at
+  END
+`;
+
 export type Part11SignerAccount = {
   email: string;
   emailVerified: boolean;
@@ -80,7 +95,7 @@ export async function findSignerAccounts(
         u.email,
         u.name,
         u."emailVerified" AS "emailVerified",
-        u.identity_verified_at AS "identityVerifiedAt",
+        ${CURRENT_IDENTITY_VERIFIED_AT_SQL} AS "identityVerifiedAt",
         u.signing_locked_at AS "signingLockedAt"
       FROM "user" u
       WHERE lower(u.email) = ANY($1)
@@ -113,6 +128,12 @@ export function describePart11SignerProblem(
 
   if (account.identityVerifiedAt === null) {
     return `An administrator has to confirm ${signer.name}'s identity under Settings, People before they can sign.`;
+  }
+
+  // The signature is shown and recorded under the confirmed person's name,
+  // so the envelope has to be sent to that person, not under another name.
+  if (!namesMatch(signer.name, account.name)) {
+    return `The account for ${signer.email} is confirmed as ${account.name}. Part 11 signatures are made in the confirmed name, so use that name for this signer.`;
   }
 
   if (account.signingLockedAt !== null) {
@@ -221,12 +242,14 @@ export async function setIdentityVerification(
           identity_verified_at = $1,
           identity_verified_by = $2,
           identity_verification_note = $3,
+          identity_verified_name = $4,
+          identity_verified_email = $5,
           "updatedAt" = now()
-        WHERE id = $4
+        WHERE id = $6
       `,
       input.verified
-        ? [now, actor.userId, note, targetUserId]
-        : [null, null, null, targetUserId],
+        ? [now, actor.userId, note, target.name, target.email, targetUserId]
+        : [null, null, null, null, null, targetUserId],
     );
     await recordSystemAuditEvent(
       {
@@ -335,6 +358,12 @@ export async function checkSigningCredentials(
     email: string;
     ipAddress?: string | null;
     password: string;
+    /**
+     * The name the signature is made in. It has to be the confirmed
+     * person's: a confirmation of someone else, made after the envelope was
+     * sent, does not count for it.
+     */
+    signerName?: string;
     userAgent?: string | null;
     userId: string;
   },
@@ -366,7 +395,7 @@ export async function checkSigningCredentials(
           u.signing_failed_attempts AS "failedAttempts",
           u.signing_locked_at AS "lockedAt",
           u."emailVerified" AS "emailVerified",
-          u.identity_verified_at AS "identityVerifiedAt",
+          ${CURRENT_IDENTITY_VERIFIED_AT_SQL} AS "identityVerifiedAt",
           (
             SELECT a.password FROM account a
             WHERE a."userId" = u.id AND a."providerId" = 'credential'
@@ -389,7 +418,12 @@ export async function checkSigningCredentials(
 
     // Checked again at every signature: what was true at send may not be
     // now. Not a wrong password, so it does not count towards the lock.
-    if (!account.emailVerified || account.identityVerifiedAt === null) {
+    if (
+      !account.emailVerified ||
+      account.identityVerifiedAt === null ||
+      (input.signerName !== undefined &&
+        !namesMatch(input.signerName, account.name))
+    ) {
       return {
         attemptsLeft: Math.max(
           0,

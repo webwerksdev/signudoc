@@ -335,3 +335,30 @@ test("the storage driver is chosen from what is connected", () => {
   assert.equal(supportsDirectUploads(connectedEnv), true);
   assert.equal(supportsDirectUploads({}), false);
 });
+
+test("an empty STORAGE_LOCAL_DIR keeps files in the default folder", async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), "signudoc-storage-"));
+  const previousDir = process.cwd();
+
+  t.mock.method(console, "warn", () => {});
+  process.chdir(workDir);
+
+  try {
+    const storage = createLocalStorageService({
+      env: { STORAGE_LOCAL_DIR: " " },
+    });
+
+    await storage.putObject({
+      body: new Uint8Array([1, 2, 3]),
+      contentType: "application/pdf",
+      key: KEY,
+    });
+
+    // Not in the working directory itself.
+    assert.deepEqual(await readdir(workDir), [".data"]);
+    assert.deepEqual([...(await storage.getObject(KEY)).body], [1, 2, 3]);
+  } finally {
+    process.chdir(previousDir);
+    await rm(workDir, { force: true, recursive: true });
+  }
+});

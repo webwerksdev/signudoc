@@ -8,6 +8,7 @@ import {
   type DbExecutor,
   type DbPool,
   getDb,
+  queryMany,
   queryOne,
   withTransaction,
 } from "./db/connection.ts";
@@ -28,7 +29,11 @@ import {
   isEmailNotConnectedError,
   type EmailService,
 } from "./services/email.ts";
-import { buildDeadlineLine } from "./services/signing-invitation-email.ts";
+import {
+  buildDeadlineLine,
+  describeRequestedAction,
+} from "./services/signing-invitation-email.ts";
+import { isEmbeddedEnvelope } from "./embedding.ts";
 import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import {
   formatReminderAvailableAt,
@@ -42,6 +47,7 @@ import {
 import { escapeHtml } from "./utils/html.ts";
 
 type ReminderEnvelopeRow = {
+  delivery: "email" | "embedded";
   expiresAt: number | null;
   id: string;
   ownerEmail: string;
@@ -60,6 +66,7 @@ type ReminderSignerRow = {
   lastNotifiedAt: number | null;
   lastNudgedAt: number | null;
   name: string;
+  role: string;
   signOrder: number;
   signingTokenExpiresAt: number | null;
   signingTokenHash: string | null;
@@ -102,6 +109,8 @@ type PersistedReminder = {
   signerEmail: string;
   signerId: string;
   signerName: string;
+  /** An approver is reminded to approve, not to sign. */
+  signerRole: "approver" | "signer";
   senderName: string;
   userId: string;
 };
@@ -161,6 +170,7 @@ async function getReminderEnvelope(
         e.user_id AS "userId",
         e.title,
         e.status,
+        e.delivery,
         e.expires_at AS "expiresAt",
         e.reminder_interval_days AS "reminderIntervalDays",
         e.updated_at AS "updatedAt",
@@ -176,9 +186,35 @@ async function getReminderEnvelope(
   );
 }
 
+/**
+ * Everyone whose turn it is: one signer, or every signer of a step that
+ * signs at the same time. Each is reminded on their own, with their own
+ * link and their own wait between reminders.
+ */
+async function listWaitingSignerIds(
+  envelopeId: string,
+  database: DbExecutor,
+): Promise<string[]> {
+  const rows = await queryMany<{ id: string }>(
+    database,
+    `
+      SELECT id
+      FROM signers
+      WHERE envelope_id = $1
+        AND status = 'notified'
+      ORDER BY sign_order ASC, id ASC
+    `,
+    [envelopeId],
+  );
+
+  return rows.map((row) => row.id);
+}
+
+/** The waiting signer, or the first of them when none is named. */
 async function getCurrentSignerForEnvelope(
   envelopeId: string,
   database: DbExecutor,
+  signerId: string | null = null,
 ): Promise<ReminderSignerRow | null> {
   return queryOne<ReminderSignerRow>(
     database,
@@ -188,6 +224,7 @@ async function getCurrentSignerForEnvelope(
         envelope_id AS "envelopeId",
         name,
         email,
+        role,
         sign_order AS "signOrder",
         status,
         signing_token_hash AS "signingTokenHash",
@@ -198,10 +235,11 @@ async function getCurrentSignerForEnvelope(
       FROM signers
       WHERE envelope_id = $1
         AND status = 'notified'
+        AND ($2::text IS NULL OR id = $2)
       ORDER BY sign_order ASC, id ASC
       LIMIT 1
     `,
-    [envelopeId],
+    [envelopeId, signerId],
   );
 }
 
@@ -214,34 +252,36 @@ function buildReminderEmail(input: {
   senderName: string;
   signerEmail: string;
   signerName: string;
+  signerRole?: "approver" | "signer";
   signingUrl: string;
 }) {
   const automatic = input.kind === "automatic";
+  const action = describeRequestedAction(input.signerRole);
   const subject = automatic
-    ? `Reminder: ${input.senderName} is waiting for your signature on "${input.envelopeTitle}"`
-    : `${input.senderName} sent you a reminder to sign "${input.envelopeTitle}"`;
+    ? `Reminder: ${input.senderName} is waiting for your ${action.noun} on "${input.envelopeTitle}"`
+    : `${input.senderName} sent you a reminder to ${action.verb} "${input.envelopeTitle}"`;
   const introLine = automatic
-    ? `${input.senderName} is still waiting for your signature on "${input.envelopeTitle}", sent through ${input.branding.productName}.`
-    : `${input.senderName} sent you a reminder to sign "${input.envelopeTitle}" through ${input.branding.productName}.`;
+    ? `${input.senderName} is still waiting for your ${action.noun} on "${input.envelopeTitle}", sent through ${input.branding.productName}.`
+    : `${input.senderName} sent you a reminder to ${action.verb} "${input.envelopeTitle}" through ${input.branding.productName}.`;
   const deadlineLine = buildDeadlineLine(input.expiresAt);
   const textBody = [
     `Hi ${input.signerName},`,
     "",
     introLine,
     "",
-    "Review and sign the document here:",
+    `${action.linkText} here:`,
     input.signingUrl,
     ...(deadlineLine ? ["", deadlineLine] : []),
     "",
-    `You do not need a ${input.branding.productName} account to sign.`,
+    `You do not need a ${input.branding.productName} account to ${action.accountLine}.`,
     "If you receive a newer invitation or reminder link, use the newest one.",
   ].join("\n");
   const htmlBody = [
     `<p>Hi ${escapeHtml(input.signerName)},</p>`,
     `<p>${escapeHtml(introLine)}</p>`,
-    `<p><a href="${escapeHtml(input.signingUrl)}">Review and sign the document</a></p>`,
+    `<p><a href="${escapeHtml(input.signingUrl)}">${escapeHtml(action.linkText)}</a></p>`,
     deadlineLine ? `<p>${escapeHtml(deadlineLine)}</p>` : "",
-    `<p>You do not need a ${escapeHtml(input.branding.productName)} account to sign.</p>`,
+    `<p>You do not need a ${escapeHtml(input.branding.productName)} account to ${action.accountLine}.</p>`,
     "<p>If you receive a newer invitation or reminder link, use the newest one.</p>",
   ].join("");
   const legalFooter = withUserEmailLegalFooter(
@@ -290,6 +330,7 @@ async function persistReminder(
   request: ReminderRequest,
   dispatchedAt: number,
   database: DbPool,
+  signerId: string | null = null,
 ): Promise<PersistedReminder> {
   const userId = request.kind === "manual" ? request.userId : null;
   const envelope = await getReminderEnvelope(envelopeId, userId, database);
@@ -305,7 +346,11 @@ async function persistReminder(
     );
   }
 
-  const signer = await getCurrentSignerForEnvelope(envelopeId, database);
+  const signer = await getCurrentSignerForEnvelope(
+    envelopeId,
+    database,
+    signerId,
+  );
 
   if (!signer) {
     throw new ReminderMutationError(
@@ -348,6 +393,16 @@ async function persistReminder(
       );
     }
 
+    // Checked again under the lock: the envelope may have been sent for
+    // another app to sign since the early check, and a reminder would
+    // retire the link that app holds.
+    if (persistedEnvelope.delivery === "embedded") {
+      throw new ReminderMutationError(
+        "This envelope is signed in another app, so SignuDoc does not email its signers.",
+        409,
+      );
+    }
+
     // The deadline may have been moved since the link was issued. From
     // here on it cannot be: the envelope's row is locked.
     if (persistedEnvelope.expiresAt !== envelope.expiresAt) {
@@ -357,7 +412,13 @@ async function persistReminder(
       );
     }
 
-    const persistedSigner = await getCurrentSignerForEnvelope(envelopeId, tx);
+    // The same signer as the one read above: the first waiting one may be
+    // another by now, if this one signed meanwhile.
+    const persistedSigner = await getCurrentSignerForEnvelope(
+      envelopeId,
+      tx,
+      signer.id,
+    );
 
     if (!persistedSigner) {
       throw new ReminderMutationError(
@@ -488,6 +549,7 @@ async function persistReminder(
       signerEmail: persistedSigner.email,
       signerId: persistedSigner.id,
       signerName: persistedSigner.name,
+      signerRole: persistedSigner.role === "approver" ? "approver" : "signer",
       userId: persistedEnvelope.userId,
     };
   }, database);
@@ -518,6 +580,7 @@ async function deliverReminder(
           senderName: persisted.senderName,
           signerEmail: persisted.signerEmail,
           signerName: persisted.signerName,
+          signerRole: persisted.signerRole,
           signingUrl: persisted.issuedLink.url,
         }),
       )
@@ -623,6 +686,15 @@ export async function sendManualEnvelopeNudge(
     nowUnixTimestamp = Math.floor(Date.now() / 1000),
   }: SendReminderOptions = {},
 ) {
+  // Its signers sign in another app, which reminds them itself. A reminder
+  // would also retire the link that app holds.
+  if (await isEmbeddedEnvelope(envelopeId, database, userId)) {
+    throw new ReminderMutationError(
+      "This envelope is signed in another app, so SignuDoc does not email its signers.",
+      409,
+    );
+  }
+
   // Before the reminder is saved: saving retires the signer's current link,
   // so with no email to carry the new one the signer would be left with none.
   let service: EmailService;
@@ -637,22 +709,84 @@ export async function sendManualEnvelopeNudge(
     throw error;
   }
 
-  const persisted = await persistReminder(
-    envelopeId,
-    { ...input, kind: "manual", userId },
-    nowUnixTimestamp,
-    database,
-  );
+  // Every signer whose turn it is and whose last reminder is far enough
+  // back. With nobody waiting, or an envelope that is not this sender's,
+  // the one attempt with no signer named says why.
+  const waitingSignerIds = await listWaitingSignerIds(envelopeId, database);
+  const targets: (string | null)[] =
+    waitingSignerIds.length > 0 ? waitingSignerIds : [null];
+  const reminded: PersistedReminder[] = [];
+  let refusal: ReminderMutationError | null = null;
+  let deliveryError: unknown = null;
 
-  await deliverReminder(persisted, "manual", database, service);
+  for (const signerId of targets) {
+    let persisted: PersistedReminder;
+
+    try {
+      persisted = await persistReminder(
+        envelopeId,
+        { ...input, kind: "manual", userId },
+        nowUnixTimestamp,
+        database,
+        signerId,
+      );
+    } catch (error) {
+      if (!(error instanceof ReminderMutationError)) {
+        throw error;
+      }
+
+      // Kept to explain why nothing was sent. Of two waits, the shorter.
+      if (
+        refusal === null ||
+        (error.nextAvailableAt !== null &&
+          (refusal.nextAvailableAt === null ||
+            error.nextAvailableAt < refusal.nextAvailableAt))
+      ) {
+        refusal = error;
+      }
+
+      continue;
+    }
+
+    try {
+      await deliverReminder(persisted, "manual", database, service);
+      reminded.push(persisted);
+    } catch (error) {
+      // Put back as it was by deliverReminder. The others still go, and
+      // the sender is told only who was reminded, so this one is logged.
+      console.error(
+        `Failed to send the reminder for envelope ${envelopeId} to signer ${persisted.signerId}:`,
+        error,
+      );
+      deliveryError ??= error;
+    }
+  }
+
+  const first = reminded[0];
+
+  if (!first) {
+    throw (
+      deliveryError ??
+      refusal ??
+      new ReminderMutationError(
+        "This envelope is no longer waiting on a signer.",
+        409,
+      )
+    );
+  }
+
+  const names = reminded.map((entry) => entry.signerName);
 
   return manualNudgeResponseSchema.parse({
-    envelopeId: persisted.envelopeId,
-    nextAvailableAt: persisted.nextAvailableAt,
-    nextAvailableAtLabel: formatReminderAvailableAt(persisted.nextAvailableAt),
+    envelopeId: first.envelopeId,
+    nextAvailableAt: first.nextAvailableAt,
+    nextAvailableAtLabel: formatReminderAvailableAt(first.nextAvailableAt),
     sentAt: nowUnixTimestamp,
-    signerId: persisted.signerId,
-    signerName: persisted.signerName,
+    signerId: first.signerId,
+    signerName:
+      names.length === 1
+        ? first.signerName
+        : `${first.signerName.slice(0, 120)} and ${String(names.length - 1)} more`,
   });
 }
 
@@ -670,31 +804,49 @@ export async function sendAutomaticEnvelopeReminder(
     database = getDb(),
     emailService,
     nowUnixTimestamp = Math.floor(Date.now() / 1000),
-  }: SendReminderOptions = {},
+    signerId,
+  }: SendReminderOptions & {
+    /** One waiting signer. Left out: each waiting signer who is due. */
+    signerId?: string;
+  } = {},
 ): Promise<boolean> {
-  let persisted: PersistedReminder;
-
-  try {
-    persisted = await persistReminder(
-      envelopeId,
-      { kind: "automatic" },
-      nowUnixTimestamp,
-      database,
-    );
-  } catch (error) {
-    if (error instanceof ReminderMutationError) {
-      return false;
-    }
-
-    throw error;
+  if (await isEmbeddedEnvelope(envelopeId, database)) {
+    return false;
   }
 
-  await deliverReminder(
-    persisted,
-    "automatic",
-    database,
-    emailService ?? createEmailService(),
-  );
+  const targets = signerId
+    ? [signerId]
+    : await listWaitingSignerIds(envelopeId, database);
+  let sent = false;
 
-  return true;
+  for (const target of targets) {
+    let persisted: PersistedReminder;
+
+    try {
+      persisted = await persistReminder(
+        envelopeId,
+        { kind: "automatic" },
+        nowUnixTimestamp,
+        database,
+        target,
+      );
+    } catch (error) {
+      if (error instanceof ReminderMutationError) {
+        continue;
+      }
+
+      throw error;
+    }
+
+    await deliverReminder(
+      persisted,
+      "automatic",
+      database,
+      emailService ?? createEmailService(),
+    );
+
+    sent = true;
+  }
+
+  return sent;
 }

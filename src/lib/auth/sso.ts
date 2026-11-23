@@ -15,6 +15,28 @@ import { readEnv, type EnvSource } from "../utils/env.ts";
 // The addresses in PASSWORD_SIGN_IN_ALLOWED_EMAILS keep their password, as a
 // way in for an administrator when the provider is down.
 
+/**
+ * Whether the identity provider vouches for a profile's email address. Only
+ * an explicit yes counts: the address decides which existing account a
+ * sign-in is tied to, so a claim that is missing, or anything other than
+ * true, leaves it unverified.
+ *
+ * Microsoft Entra ID never sends email_verified, and an Entra user can set an
+ * address in a domain the tenant does not own. Entra's optional xms_edov
+ * claim ("email domain owner verified") says the tenant owns the address's
+ * domain; add it to the app's ID token under Token configuration to let
+ * Entra users sign in to existing accounts.
+ */
+export function isSsoEmailVerified(profile: Record<string, unknown>): boolean {
+  return (
+    profile.email_verified === true ||
+    profile.email_verified === "true" ||
+    profile.xms_edov === true ||
+    profile.xms_edov === "true" ||
+    profile.xms_edov === 1
+  );
+}
+
 /** The provider id in Better Auth: its routes end in /oauth2/callback/sso. */
 export const SSO_PROVIDER_ID = "sso";
 

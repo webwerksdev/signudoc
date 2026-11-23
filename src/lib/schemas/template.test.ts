@@ -7,6 +7,7 @@ import {
   templateRolesSchema,
   useTemplateSchema,
 } from "./template.ts";
+import { MAX_SIGNERS_CEILING } from "../types/domain.ts";
 
 test("a template needs a name, and its signers need different names", () => {
   assert.deepEqual(saveTemplateSchema.parse({ name: " Lease " }), {
@@ -40,12 +41,24 @@ test("a template needs a name, and its signers need different names", () => {
   assert.equal(templateRolesSchema.safeParse([]).success, false);
   assert.equal(
     templateRolesSchema.safeParse(
-      Array.from({ length: 11 }, (_, index) => ({
+      Array.from({ length: MAX_SIGNERS_CEILING + 1 }, (_, index) => ({
         id: String(index),
         name: `Signer ${String(index)}`,
       })),
     ).success,
     false,
+  );
+});
+
+test("a template can have as many roles as the ceiling allows", () => {
+  assert.equal(
+    templateRolesSchema.safeParse(
+      Array.from({ length: MAX_SIGNERS_CEILING }, (_, index) => ({
+        id: String(index),
+        name: `Signer ${String(index)}`,
+      })),
+    ).success,
+    true,
   );
 });
 

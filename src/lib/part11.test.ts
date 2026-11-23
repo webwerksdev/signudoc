@@ -87,6 +87,34 @@ test("a send is refused for each missing Part 11 condition, in order", () => {
   );
 });
 
+test("a Part 11 send is refused in a name other than the confirmed person's", () => {
+  const account = {
+    email: "alice@example.test",
+    emailVerified: true,
+    identityVerifiedAt: 1,
+    name: "Alice B. Holder",
+    signingLockedAt: null,
+    userId: "u1",
+  };
+  const signer = {
+    email: "alice@example.test",
+    signatureMeaning: "approval" as const,
+  };
+
+  assert.match(
+    describePart11SignerProblem(
+      { ...signer, name: "Dr Victim Name" },
+      account,
+    ) ?? "",
+    /confirmed as Alice B\. Holder/,
+  );
+  // The same person written another way still goes.
+  assert.equal(
+    describePart11SignerProblem({ ...signer, name: "alice holder" }, account),
+    null,
+  );
+});
+
 test("a signer bound to an account must pass the account check first", () => {
   assert.deepEqual(
     requiredSignerChecks({

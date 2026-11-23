@@ -17,6 +17,7 @@ import {
 export const signingUnavailableStateSchema = z.enum([
   "expired",
   "already-signed",
+  "completed",
   "voided",
   "declined",
 ]);
@@ -54,7 +55,8 @@ export const signingVisibleFieldSchema = signingFieldBaseSchema.extend({
 export const signingDisclosureSchema = z.object({
   sections: z.array(
     z.object({
-      heading: z.string().trim().min(1),
+      // Empty when the section is a plain paragraph with no heading.
+      heading: z.string().trim(),
       text: z.string().trim().min(1),
     }),
   ),
@@ -68,6 +70,8 @@ export const signingPayloadSchema = z.object({
   currentSignerFields: z.array(signingCurrentFieldSchema),
   disclosure: signingDisclosureSchema,
   declineUrl: z.string().trim().min(1),
+  /** Checks, as the signer types, that an answer fits its box. */
+  fieldFitUrl: z.string().trim().min(1),
   documentUrl: z.string().trim().min(1),
   envelopeId: idSchema,
   envelopeTitle: envelopeTitleSchema,
@@ -103,7 +107,11 @@ export const signingPayloadSchema = z.object({
     id: idSchema,
     name: nameSchema,
     order: z.number().int().positive(),
+    // An approver approves or rejects; there are no fields to fill in.
+    role: z.enum(["signer", "approver"]).optional(),
   }),
+  /** Where an approver's approval is sent. */
+  approveUrl: z.string().trim().min(1).optional(),
   state: z.literal("ready"),
   submitUrl: z.string().trim().min(1),
   visibleFields: z.array(signingVisibleFieldSchema),
@@ -150,8 +158,19 @@ export const signerCheckRequestSchema = z.discriminatedUnion("method", [
   }),
 ]);
 
+/** What the signer has typed so far in one field, to check it fits. */
+export const signingFieldFitRequestSchema = z.object({
+  fieldId: idSchema,
+  value: z.string().max(5000),
+});
+
 export const signerConsentRequestSchema = z.object({
   disclosureVersion: z.string().trim().min(1).max(40),
+});
+
+/** An approver's approval. There is nothing else to send. */
+export const approvalSubmissionSchema = z.object({
+  clientTimezoneOffsetMinutes: z.number().int().min(-840).max(840),
 });
 
 export type SigningVerificationState = {

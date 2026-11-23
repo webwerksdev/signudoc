@@ -52,18 +52,26 @@ const workflowSteps: readonly WorkflowStep[] = [
 type ComparisonRow = {
   feature: string;
   signudoc: string | boolean;
-  docusign: string | boolean;
+  perSeat: string | boolean;
 };
 
 const comparisonRows: readonly ComparisonRow[] = [
-  { feature: "Price", signudoc: "Free forever", docusign: "$10–15/mo" },
-  { feature: "Envelopes per month", signudoc: "Unlimited", docusign: "5" },
+  {
+    feature: "Price",
+    signudoc: "Free forever",
+    perSeat: "Per user, every month",
+  },
+  {
+    feature: "Envelopes per month",
+    signudoc: "Unlimited",
+    perSeat: "Capped by plan",
+  },
   {
     feature: "Signers per document",
-    signudoc: "Up to 10",
-    docusign: "Varies by plan",
+    signudoc: "Up to 25",
+    perSeat: "Varies by plan",
   },
-  { feature: "Reminders", signudoc: true, docusign: "Standard+ ($25+/mo)" },
+  { feature: "Reminders", signudoc: true, perSeat: "Higher plans only" },
 ] as const;
 
 const faqItems: readonly FaqItem[] = [
@@ -264,7 +272,7 @@ export function LandingShell() {
               </h2>
               <p className={sectionLeadClassName}>
                 Everything below is included. Forever. For $0. See how that
-                stacks up against DocuSign.
+                stacks up against a typical per-seat e-signature plan.
               </p>
             </div>
 
@@ -324,7 +332,7 @@ export function LandingShell() {
               </div>
 
               <p className="mt-7 text-sm text-white/75">
-                Free • no signer account required • up to 10 signers per
+                Free • no signer account required • up to 25 signers per
                 document
               </p>
             </div>
@@ -387,7 +395,7 @@ function ComparisonTable() {
               </th>
               <th className="w-[32%] px-5 py-4 text-center">
                 <span className="text-[1.0625rem] font-bold tracking-[-0.02em] text-(--tertiary)">
-                  DocuSign
+                  Per-seat plans
                 </span>
               </th>
             </tr>
@@ -407,7 +415,7 @@ function ComparisonTable() {
                   <ComparisonValue advantage value={row.signudoc} />
                 </td>
                 <td className="border-t border-(--border) px-5 py-4 text-center text-(--secondary)">
-                  <ComparisonValue value={row.docusign} />
+                  <ComparisonValue value={row.perSeat} />
                 </td>
               </tr>
             ))}
@@ -427,7 +435,7 @@ function ComparisonTable() {
               label="SignuDoc"
               value={row.signudoc}
             />
-            <ComparisonMobileRow label="DocuSign" value={row.docusign} />
+            <ComparisonMobileRow label="Per-seat plans" value={row.perSeat} />
           </div>
         ))}
       </div>

@@ -10,6 +10,7 @@ import type pg from "pg";
 import { openTestDatabase } from "./db/test-database.ts";
 import { listPeople, PeopleError, setPersonRole } from "./people.ts";
 import { runRetentionSweep } from "./retention.ts";
+import { listSystemAuditEvents } from "./services/system-audit.ts";
 import { createStorageService } from "./services/storage.ts";
 
 // Administrator roles against a real Postgres: there is always at least
@@ -527,5 +528,42 @@ test("an account past the end of the list can still be found and made an adminis
   assert.equal(
     (await setPersonRole(administrator, last, "admin", database)).role,
     "admin",
+  );
+});
+
+test("a role change records where the administrator made it from", async () => {
+  await resetRoles();
+
+  const administrator = await createUser({ role: "admin" });
+  const member = await createUser();
+
+  await setPersonRole(administrator, member, "admin", database, {
+    ipAddress: "203.0.113.41",
+    userAgent: "people dbtest",
+  });
+  await setPersonRole(administrator, member, "user", database, {
+    ipAddress: "203.0.113.41",
+    userAgent: "people dbtest",
+  });
+
+  const recorded = (await listSystemAuditEvents({ limit: 1000 }, database))
+    .filter(
+      (event) =>
+        event.event === "role_changed" && event.targetUserId === member,
+    )
+    .map((event) => ({
+      ipAddress: event.ipAddress,
+      to: event.metadata?.to,
+      userAgent: event.userAgent,
+    }));
+
+  assert.deepEqual(
+    recorded.sort((left, right) =>
+      String(left.to).localeCompare(String(right.to)),
+    ),
+    [
+      { ipAddress: "203.0.113.41", to: "admin", userAgent: "people dbtest" },
+      { ipAddress: "203.0.113.41", to: "user", userAgent: "people dbtest" },
+    ],
   );
 });

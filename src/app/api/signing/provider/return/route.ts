@@ -8,7 +8,7 @@ import {
 import { readCookie, verifiedMethodsFromCookies } from "@/lib/signer-checks";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import {
@@ -52,7 +52,7 @@ export async function GET(request: Request) {
     return endedPage();
   }
 
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "signing_submit",
     key: buildRateLimitKey([
       "signing-provider-return",

@@ -50,6 +50,33 @@ export async function applyRateLimit(
   );
 }
 
+// Every public link route (signing, downloads) is limited per link, and each
+// made-up link would start a count of its own. So one address also gets a
+// fixed number of link requests in all, whatever links it asks for.
+const PUBLIC_LINK_REQUESTS_PER_ADDRESS = 1000;
+const PUBLIC_LINK_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * For a route opened by a link's token: counts the request against the
+ * address's limit for all public links first, then against the route's own.
+ */
+export async function applyPublicLinkRateLimit(
+  input: RateLimitInput,
+): Promise<NextResponse | null> {
+  return (
+    (await applyRateLimit({
+      category: "public_link_address",
+      key: buildRateLimitKey([
+        "public-link",
+        getClientIpAddress(input.request.headers) ?? "unknown",
+      ]),
+      limit: PUBLIC_LINK_REQUESTS_PER_ADDRESS,
+      request: input.request,
+      windowMs: PUBLIC_LINK_WINDOW_MS,
+    })) ?? (await applyRateLimit(input))
+  );
+}
+
 export function buildRateLimitKey(parts: Array<string | null | undefined>) {
   return parts
     .map((part) => part?.trim())

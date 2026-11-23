@@ -6,6 +6,7 @@ import {
   clearRateLimitStoreForTests,
   consumeRateLimit,
   consumeRateLimitInMemory,
+  refundRateLimit,
 } from "./rate-limit.ts";
 
 // The statement itself is exercised against a real Postgres in
@@ -54,6 +55,7 @@ test("in memory, requests up to the limit are allowed and the next is not", () =
   assert.deepEqual(consumeRateLimitInMemory({ ...input, now: START + 10 }), {
     allowed: false,
     count: 4,
+    countedIn: "memory",
     retryAfterSeconds: 60,
   });
 });
@@ -115,6 +117,7 @@ test("the database's count decides, and only a hash of the key is sent to it", a
   assert.deepEqual(decision, {
     allowed: false,
     count: 6,
+    countedIn: "database",
     retryAfterSeconds: 30,
   });
 
@@ -163,4 +166,42 @@ test("when the database cannot be used the limit is still enforced, from memory"
   );
   // Said once, not once per request.
   assert.equal(warn.mock.callCount(), 1);
+});
+
+test("a refund goes to the store that counted the request", async () => {
+  const input = {
+    key: "access:signer:code",
+    limit: 5,
+    now: START,
+    windowMs: MINUTE,
+  };
+  const down = fakeDatabase(() => new Error("connection refused"));
+
+  // Counted in memory while the database could not be asked.
+  await consumeRateLimit(input, { database: down.database });
+  const second = await consumeRateLimit(input, { database: down.database });
+
+  assert.equal(second.countedIn, "memory");
+
+  // The database is back by the time of the refund: memory is still where
+  // the count is taken off, and the database is not asked.
+  const up = fakeDatabase(() => ({ count: 0, expires_at: START + MINUTE }));
+
+  await refundRateLimit(input.key, second, {
+    database: up.database,
+    now: START,
+  });
+
+  assert.equal(up.queries.length, 0);
+  assert.equal(consumeRateLimitInMemory(input).count, 2);
+
+  // Counted in the database: the database is where it comes off.
+  await refundRateLimit(
+    input.key,
+    { countedIn: "database" },
+    { database: up.database, now: START },
+  );
+
+  assert.equal(up.queries.length, 1);
+  assert.match(up.queries[0]!.text, /count = greatest\(count - 1, 0\)/);
 });

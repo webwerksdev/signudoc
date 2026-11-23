@@ -1,6 +1,6 @@
 # Release and change control
 
-SignuDoc has no numbered releases. Each commit on `main` is a version. Your install runs whichever commit you last pulled into your copy (see [Keep your install up to date](../self-hosting.md#keep-your-install-up-to-date)). Change control is about deciding which commit you run and showing that it still works.
+SignuDoc publishes numbered [releases](https://github.com/NYLLON-SOFTWARE/SignuDoc/releases), such as `v0.5.2`. Each one is a tag on a commit on `main`, with the source archive, a software bill of materials and checksums attached (see [Verifying a release](../../SECURITY.md#verifying-a-release)). The release tag names the version in a change record. Your install runs whichever commit you last deployed in your copy (see [Keep your install up to date](../self-hosting.md#keep-your-install-up-to-date)), and that commit can differ from the release's when your copy has changes of its own, so record the deployed commit too. Change control is about deciding which version you run and showing that it still works.
 
 ## Evidence each version gives you
 
@@ -13,7 +13,7 @@ For a commit, the run on the GitHub Actions page is your test evidence. Save its
 
 ## Procedure for taking a new version
 
-1. **Identify** the commit you want, and list the commits between it and the one you run now (`git log <current>..<new> --oneline`).
+1. **Identify** the release you want (its tag, such as `v0.5.2`, and the commit it points at), and list the commits between it and the one you run now (`git log <current>..<new> --oneline`).
 2. **Assess** which ones touch the files in the [traceability matrix](traceability-matrix.md). Any database migration (`db/migrations/`) is a change to the record structure and needs a closer look.
 3. **Check** that CI passed for the new commit, and file the run link.
 4. **Test** on a separate test install with **its own database and Blob store**, never on production data:

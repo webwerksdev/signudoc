@@ -20,6 +20,7 @@ import {
   type Tlv,
 } from "./der.ts";
 import { parseCertificate, type Certificate } from "./pdf-ltv.ts";
+import { namesMatch } from "../name-match.ts";
 
 // The CMS of one signer's own signature (CAdES, as PAdES uses it).
 //
@@ -707,23 +708,6 @@ export function certificateHolderNames(certificate: Certificate): string[] {
 }
 
 /**
- * A name's words, without case, accents, punctuation or numbers. An
- * apostrophe joins the letters around it, so O'Connor and OConnor are the
- * same word; other punctuation, such as a hyphen, separates words.
- */
-function nameWords(name: string): Set<string> {
-  return new Set(
-    name
-      .replace(/['`\u00B4\u2018\u2019\u02BC]/gu, "")
-      .normalize("NFKD")
-      .replace(/\p{M}+/gu, "")
-      .toLocaleLowerCase("en")
-      .split(/[^\p{L}\p{N}]+/u)
-      .filter((word) => word.length > 0 && !/\p{N}/u.test(word)),
-  );
-}
-
-/**
  * Whether a certificate is in the name a signer was sent the document
  * under. Case, accents, punctuation and word order do not count, nor do
  * numbers (some national certificates put the holder's ID code in the
@@ -735,19 +719,9 @@ export function certificateMatchesName(
   certificate: Certificate,
   invitedName: string,
 ): boolean {
-  const invited = nameWords(invitedName);
-
-  return certificateHolderNames(certificate).some((name) => {
-    const words = nameWords(name);
-    const [shorter, longer] =
-      words.size <= invited.size ? [words, invited] : [invited, words];
-
-    return (
-      shorter.size > 0 &&
-      [...shorter].every((word) => longer.has(word)) &&
-      (shorter.size >= 2 || words.size === invited.size)
-    );
-  });
+  return certificateHolderNames(certificate).some((name) =>
+    namesMatch(name, invitedName),
+  );
 }
 
 /**

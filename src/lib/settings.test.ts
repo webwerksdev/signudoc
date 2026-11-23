@@ -11,6 +11,7 @@ import {
 const stored: AppSettings = {
   allowedEmailDomains: ["acme.com"],
   brandColor: null,
+  consentDisclosure: null,
   emailReadyAt: null,
   logoVersion: null,
   organizationName: "Acme Corp",
@@ -62,6 +63,17 @@ test("hosted mode is switched on by HOSTED_MODE", () => {
   assert.equal(resolveSettings(null, { HOSTED_MODE: "true" }).hosted, true);
   assert.equal(resolveSettings(null, { HOSTED_MODE: "0" }).hosted, false);
   assert.equal(resolveSettings(null, { HOSTED_MODE: "" }).hosted, false);
+});
+
+test("a stored disclosure is used, except on the hosted service", () => {
+  const custom = { ...stored, consentDisclosure: "Our own words." };
+
+  assert.equal(resolveSettings(custom, {}).consentDisclosure, "Our own words.");
+  assert.equal(
+    resolveSettings(custom, { HOSTED_MODE: "1" }).consentDisclosure,
+    null,
+  );
+  assert.equal(resolveSettings(null, {}).consentDisclosure, null);
 });
 
 test("a neutral install goes by the organization's name and links", () => {

@@ -32,7 +32,13 @@ export default async function SignPage({
   const signatureProblem =
     SIGNATURE_PROBLEMS.find((problem) => problem === problemParam) ?? null;
   let initialState:
-    "already-signed" | "declined" | "error" | "expired" | "voided" | undefined;
+    | "already-signed"
+    | "completed"
+    | "declined"
+    | "error"
+    | "expired"
+    | "voided"
+    | undefined;
   let record: Awaited<ReturnType<typeof getSigningPayloadForToken>> | null =
     null;
   let verification: SigningVerificationState | null = null;

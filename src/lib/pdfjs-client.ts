@@ -6,10 +6,8 @@ type PdfPageProxy = Awaited<ReturnType<PdfDocumentProxy["getPage"]>>;
 type PdfRenderTask = ReturnType<PdfPageProxy["render"]>;
 
 const PDF_JS_ASSET_BASE = "/pdfjs/5.5.207";
-export const PDF_JS_STANDARD_FONT_DATA_URL =
-  `${PDF_JS_ASSET_BASE}/standard_fonts/`;
-export const PDF_JS_WORKER_SRC =
-  `${PDF_JS_ASSET_BASE}/legacy/build/pdf.worker.min.mjs`;
+export const PDF_JS_STANDARD_FONT_DATA_URL = `${PDF_JS_ASSET_BASE}/standard_fonts/`;
+export const PDF_JS_WORKER_SRC = `${PDF_JS_ASSET_BASE}/legacy/build/pdf.worker.min.mjs`;
 
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
@@ -43,11 +41,13 @@ function createRenderContext(width: number, height: number) {
 }
 
 export async function loadPdfJsModule(): Promise<PdfJsModule> {
-  pdfJsModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
-    pdfjs.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_SRC;
+  pdfJsModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then(
+    (pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_SRC;
 
-    return pdfjs;
-  });
+      return pdfjs;
+    },
+  );
 
   return pdfJsModulePromise;
 }
@@ -56,7 +56,9 @@ export async function assertPdfPreviewRenderable(
   file: File | Uint8Array,
 ): Promise<void> {
   const pdfBytes =
-    file instanceof Uint8Array ? file.slice() : new Uint8Array(await file.arrayBuffer());
+    file instanceof Uint8Array
+      ? file.slice()
+      : new Uint8Array(await file.arrayBuffer());
   const pdfjs = await loadPdfJsModule();
   let loadingTask: ReturnType<PdfJsModule["getDocument"]> | null = null;
   let documentProxy: PdfDocumentProxy | null = null;

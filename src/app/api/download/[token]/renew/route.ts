@@ -5,7 +5,7 @@ import { sendFreshDownloadLinks } from "@/lib/download-renewal";
 import { DownloadAccessError } from "@/lib/downloads";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import { getClientIpAddress } from "@/lib/security/request";
@@ -20,7 +20,7 @@ const NO_STORE = { "cache-control": "private, no-store" };
 
 export async function POST(request: Request, context: RenewRouteContext) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "download_link_renewal",
     // Per link, not per address: each request sends an email.
     key: buildRateLimitKey(["download-renew", token]),

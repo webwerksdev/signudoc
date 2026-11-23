@@ -8,22 +8,36 @@ import {
   DashboardDocumentsHeader,
   DashboardDocumentsPanel,
   dashboardStatusFilterMap,
+  dashboardViewHref,
   type DashboardFilter,
+  type DashboardPagination,
   type DashboardShellState,
+  type DashboardView,
 } from "@/components/dashboard/dashboard-documents-surface";
 import { DocumentThumbnail } from "@/components/shared/document-thumbnail";
 import { ShellButton } from "@/components/shared/form-shell";
 
 type DashboardShellProps = {
   envelopes?: readonly DashboardEnvelopeListItem[];
+  /** The search the page was loaded with, run on the server. */
+  initialSearch?: string;
   initialState?: DashboardShellState;
+  pagination?: DashboardPagination;
+  /** Whose envelopes are listed, when there is a choice. */
+  view?: DashboardView;
+  /** The views this person can choose from. */
+  views?: readonly DashboardView[];
 };
 
 export function DashboardShell({
   envelopes: providedEnvelopes,
+  initialSearch = "",
   initialState = "default",
+  pagination,
+  view,
+  views,
 }: DashboardShellProps) {
-  const [searchValue, setSearchValue] = useState("");
+  const [searchValue, setSearchValue] = useState(initialSearch);
   const [selectedFilter, setSelectedFilter] = useState<DashboardFilter>("All");
 
   const envelopes =
@@ -39,6 +53,8 @@ export function DashboardShell({
     const matchesSearch =
       normalizedSearchValue.length === 0 ||
       envelope.title.toLowerCase().includes(normalizedSearchValue) ||
+      (envelope.senderLabel?.toLowerCase().includes(normalizedSearchValue) ??
+        false) ||
       envelope.searchableEmails.some((email) =>
         email.toLowerCase().includes(normalizedSearchValue),
       );
@@ -56,6 +72,12 @@ export function DashboardShell({
   }
 
   function handleResetFilters() {
+    if (initialSearch || pagination?.newerHref) {
+      // The list itself was searched, or is a later page: load the start.
+      window.location.assign(dashboardViewHref(view ?? "mine"));
+      return;
+    }
+
     setSearchValue("");
     setSelectedFilter("All");
   }
@@ -66,10 +88,14 @@ export function DashboardShell({
 
   return (
     <div className="space-y-5">
-      <DashboardDocumentsHeader />
+      <DashboardDocumentsHeader view={view} views={views} />
 
       {initialState === "empty" ? (
-        <EmptyDashboardState />
+        view === "all" ? (
+          <EmptyInstallState />
+        ) : (
+          <EmptyDashboardState />
+        )
       ) : (
         <DashboardDocumentsPanel
           envelopes={envelopes}
@@ -79,11 +105,30 @@ export function DashboardShell({
           onReset={handleResetFilters}
           onRetry={handleRetry}
           onSearchChange={handleSearchChange}
+          pagination={pagination}
           searchValue={searchValue}
+          view={view}
           selectedFilter={selectedFilter}
         />
       )}
     </div>
+  );
+}
+
+function EmptyInstallState() {
+  return (
+    <section
+      className="panel px-6 py-14 text-center sm:py-20"
+      data-animate="enter"
+      data-animate-delay="1"
+    >
+      <h2 className="text-2xl font-extrabold tracking-[-0.03em] text-(--fg)">
+        No envelopes yet
+      </h2>
+      <p className="mt-2 text-[0.9375rem] leading-6 text-(--secondary)">
+        Nobody in your organization has started an envelope.
+      </p>
+    </section>
   );
 }
 

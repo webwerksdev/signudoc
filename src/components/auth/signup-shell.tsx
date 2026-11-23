@@ -19,6 +19,10 @@ import {
 import { signUpSchema } from "@/lib/schemas/auth";
 
 const defaultSuccessMessage = "Check your email to verify your sender account.";
+// With no email provider connected, the verification email cannot be sent.
+// Logging in sends it again, so that works once email is set up.
+const SIGNUP_EMAIL_NOT_CONNECTED_MESSAGE =
+  "Your account is created, but this site can't send email yet, so the email that verifies your address couldn't be sent. Ask an administrator to finish email setup in Settings, Organization. Once it's set up, log in and the verification email will be sent.";
 
 type AuthErrorLike = {
   code?: string;
@@ -34,6 +38,8 @@ const SIGNUP_RULE_ERROR_CODES = new Set([
 ]);
 
 type SignupShellProps = {
+  /** False when the install has no email provider to send with. */
+  emailConnected?: boolean;
   /** False when password sign-in is turned off, so accounts come from SSO. */
   passwordSignIn?: boolean;
   /** Single sign-on, when the install has it (lib/auth/sso.ts). */
@@ -242,6 +248,7 @@ function SignupFormCard({
 }
 
 export function SignupShell({
+  emailConnected = true,
   passwordSignIn = true,
   signupAvailable = true,
   signupRule = null,
@@ -253,6 +260,7 @@ export function SignupShell({
 
   return (
     <LiveSignupShell
+      emailConnected={emailConnected}
       passwordSignIn={passwordSignIn || !sso}
       signupRule={signupRule}
       sso={sso}
@@ -284,10 +292,12 @@ function SignupClosedCard() {
 }
 
 function LiveSignupShell({
+  emailConnected,
   passwordSignIn,
   signupRule,
   sso,
 }: {
+  emailConnected: boolean;
   passwordSignIn: boolean;
   signupRule: string | null;
   sso: SsoOption | null;
@@ -440,7 +450,13 @@ function LiveSignupShell({
     }
 
     setSuccessEmail(validationResult.data.email);
-    setSuccessMessage(defaultSuccessMessage);
+    // With no email provider the confirmation email cannot have gone, so
+    // the sender is not told to wait for it (issue #95).
+    setSuccessMessage(
+      emailConnected
+        ? defaultSuccessMessage
+        : SIGNUP_EMAIL_NOT_CONNECTED_MESSAGE,
+    );
     setShowSuccess(true);
     setIsSubmitting(false);
   }
@@ -455,7 +471,9 @@ function LiveSignupShell({
       onEmailChange={handleChange("email")}
       onFullNameChange={handleChange("fullName")}
       onPasswordChange={handleChange("password")}
-      onResendVerification={handleResendVerification}
+      onResendVerification={
+        emailConnected ? handleResendVerification : undefined
+      }
       onSsoError={setBannerMessage}
       onSubmit={handleSubmit}
       passwordSignIn={passwordSignIn}

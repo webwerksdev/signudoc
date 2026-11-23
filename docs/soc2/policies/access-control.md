@@ -7,7 +7,7 @@
 3. **Who gets an account.** Sign-up is limited to `[our domains]`. With single sign-on, a person is given the app in `[identity provider]` by `[role]` on request from their manager.
 4. **Administrators.** At most `[N]` people are administrators, named in `[location]`. A new administrator is approved by `[role]` and made one by an existing administrator; the change is in the site audit trail.
 5. **Vendor consoles.** Only `[roles]` are members of the Vercel team, Neon project, Resend account and GitHub repository. Each uses their own login with MFA. Shared logins are not allowed.
-6. **Leavers.** On a person's last day, `[role]` removes them in `[identity provider]` and from every vendor console, and checks People in the app.
+6. **Leavers.** On a person's last day, `[role]` removes them in `[identity provider]` and from every vendor console, and checks People in the app. If they were an administrator, `[role]` takes the role away under People, which revokes the API keys they made.
 7. **Review.** Every `[quarter]`, `[role]` compares People, the administrator list and each vendor console's members against current staff, removes anyone who should not be there, and files the result.
 8. **Break-glass accounts** are used only when single sign-on is down. Each use is recorded as an incident, and the password is changed after.
 

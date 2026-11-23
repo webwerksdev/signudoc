@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db/connection";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import { getClientIpAddress } from "@/lib/security/request";
@@ -23,7 +23,7 @@ const NO_STORE = { "cache-control": "private, no-store" };
 
 export async function POST(request: Request, context: EmailCodeRouteContext) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "signing_email_code",
     key: buildRateLimitKey(["signing-email-code", token]),
     limit: 5,

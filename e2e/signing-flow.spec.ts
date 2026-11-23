@@ -1,10 +1,20 @@
 import { expect, test, type Page } from "@playwright/test";
 import pg from "pg";
 
-import { e2eDatabaseUrl, e2eSetupToken } from "../playwright.config";
+import {
+  e2eDatabaseUrl,
+  e2eOutboxDir,
+  e2eSetupToken,
+} from "../playwright.config";
 import { extractLink, extractLinks, waitForEmail } from "./support/outbox";
 import { totpCode } from "./support/totp";
-import { writeSamplePdf } from "./support/sample-pdf";
+import { startEmbedParent } from "./support/embed-parent";
+import { writeLargePdf, writeSamplePdf } from "./support/sample-pdf";
+import { startSignInWindowAfresh } from "./support/sign-in-limit";
+import {
+  hasValidSignature,
+  startWebhookReceiver,
+} from "./support/webhook-receiver";
 
 const PASSWORD = "correct horse battery staple 42";
 // The ampersand is on purpose: the name goes into HTML emails and page titles.
@@ -179,6 +189,55 @@ test("a new install is set up, a sender sends a PDF and a recipient signs it", a
       adminPage.getByText("Organization settings saved."),
     ).toBeVisible();
     await expect.poll(() => readAccentColor(adminPage)).toBe(BRAND_COLOR);
+
+    // Words of the administrator's own in place of the standard disclosure
+    // are saved only after they agree to the notice about E-SIGN. Cancel
+    // saves nothing, and going back to the standard text needs no notice.
+    const disclosureBox = adminPage.getByLabel("Disclosure text");
+    const saveOrganization = adminPage.getByRole("button", {
+      name: "Save organization settings",
+    });
+    const notice = adminPage.getByRole("dialog", {
+      name: "Before you change what signers agree to",
+    });
+
+    await expect(
+      adminPage.getByText(
+        "We're not lawyers, and nothing here is legal advice",
+      ),
+    ).toBeVisible();
+    await disclosureBox.fill("## Signing online\nWe send this online.");
+    await saveOrganization.click();
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("U.S. E-SIGN Act");
+    await expect(notice).toContainText("Nothing in SignuDoc");
+    await notice.getByRole("button", { name: "Cancel" }).click();
+    await expect(notice).toBeHidden();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeHidden();
+
+    await saveOrganization.click();
+    await notice.getByRole("button", { name: "I agree" }).click();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeVisible();
+
+    await adminPage.reload();
+    await expect(disclosureBox).toHaveValue(
+      "## Signing online\nWe send this online.",
+    );
+
+    await adminPage
+      .getByRole("button", { name: "Use the standard text" })
+      .click();
+    await saveOrganization.click();
+    await expect(notice).toBeHidden();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeVisible();
+    await adminPage.reload();
+    await expect(disclosureBox).toHaveValue("");
 
     // Setup can only happen once.
     await adminPage.goto("/setup");
@@ -869,6 +928,13 @@ test("in Part 11 mode a verified account signs, with its password and a stated m
     ).toBeVisible();
     // A retention period would delete regulated records on a timer.
     await expect(page.getByLabel("Days to keep")).toBeDisabled();
+    // Part 11 signers need an account, so the sign-up rule covers them too.
+    await expect(
+      page.getByText("Part 11 mode is on, so this covers signers too."),
+    ).toBeVisible();
+    await expect(
+      page.getByText("People who are sent a document to sign don't need"),
+    ).toHaveCount(0);
   });
 
   await test.step("the signer makes an account and confirms their email", async () => {
@@ -1064,6 +1130,11 @@ test("in Part 11 mode a verified account signs, with its password and a stated m
         })
       ).status(),
     ).toBe(200);
+    // With the mode off, ordinary signers again need no account.
+    await page.goto("/settings");
+    await expect(
+      page.getByText("People who are sent a document to sign don't need"),
+    ).toBeVisible();
   });
 });
 
@@ -1341,35 +1412,943 @@ test("a signer who declines is told the decline was recorded, not that the link 
     ).toBeVisible();
   });
 
-  await test.step("the administrator deletes the declined envelope for good", async () => {
-    await page.getByRole("button", { name: "Delete envelope" }).click();
+  await test.step("an administrator sees another member's envelope and schedules its deletion", async () => {
+    // The envelope becomes a plain member's, as if they had sent it.
+    const memberId = `member-${runId}`;
+    const memberEmail = `member+${runId}@example.com`;
+    const db = new pg.Client({ connectionString: e2eDatabaseUrl });
 
-    const confirm = page.getByRole("dialog", {
-      name: "Delete this envelope?",
-    });
+    await db.connect();
 
-    await confirm.getByLabel("Reason (optional)").fill("Never agreed.");
-    await confirm.getByRole("button", { name: "Delete envelope" }).click();
-    await expect(page).toHaveURL(/\/dashboard$/);
+    try {
+      await db.query(
+        `insert into public."user" (id, name, email, role, "emailVerified") values ($1, 'Mira Member', $2, 'user', true)`,
+        [memberId, memberEmail],
+      );
+      await db.query(`update envelopes set user_id = $1 where id = $2`, [
+        memberId,
+        envelopeId,
+      ]);
+    } finally {
+      await db.end();
+    }
 
-    await page.goto(`/envelopes/${envelopeId}`);
+    const senderLabel = `Mira Member (${memberEmail})`;
+
+    // Gone from the administrator's own list, there in everyone's.
+    await page.goto("/dashboard");
     await expect(
-      page.getByRole("heading", { name: "This envelope is unavailable" }),
+      page.getByRole("heading", { name: "Terms to decline" }),
+    ).toHaveCount(0);
+    await page.getByRole("link", { name: "Everyone's" }).click();
+    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "All envelopes" }),
     ).toBeVisible();
 
-    // The deletion itself stays on record in the install's audit trail.
+    const card = page.getByRole("link").filter({ hasText: "Terms to decline" });
+
+    await expect(card).toContainText(senderLabel);
+
+    // Enter searches every envelope, the sender's address included.
+    const search = page.getByRole("searchbox", {
+      name: "Search by title or email...",
+    });
+
+    await search.fill(memberEmail);
+    await search.press("Enter");
+    await expect(page).toHaveURL(/\/dashboard\?view=all&q=/);
+    await expect(card).toBeVisible();
+
+    // Switching views drops the search, in the box too.
+    await page.getByRole("link", { name: "Mine" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(search).toHaveValue("");
+    await page.getByRole("link", { name: "Everyone's" }).click();
+    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    await expect(search).toHaveValue("");
+    await card.click();
+    await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
+    await expect(page.getByText(`Sent by ${senderLabel}`)).toBeVisible();
+    // What changes the envelope stays with its sender.
+    await expect(
+      page.getByRole("button", { name: "Copy to new draft" }),
+    ).toHaveCount(0);
+
+    // A copy of someone else's certificate is on record.
+    const download = page.waitForEvent("download");
+
+    await page.getByRole("button", { name: "Download certificate" }).click();
+    expect((await download).suggestedFilename()).toMatch(/\.pdf$/);
+
+    // Nothing goes at once: the deletion is scheduled, and the sender is
+    // emailed a link to download it.
+    async function scheduleDeletion(reason: string) {
+      await page.getByRole("button", { name: "Delete envelope" }).click();
+
+      const confirm = page.getByRole("dialog", {
+        name: "Schedule this envelope for deletion?",
+      });
+
+      await confirm.getByLabel("Reason (optional)").fill(reason);
+      await confirm.getByRole("button", { name: "Schedule deletion" }).click();
+      await expect(page.getByText(/Scheduled to be deleted on/)).toBeVisible();
+      await expect(page.getByText(`Reason: ${reason}`)).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Delete envelope" }),
+      ).toHaveCount(0);
+    }
+
+    await scheduleDeletion("Changed my mind.");
+
+    const notice = await waitForEmail({
+      template: "deletion_notice",
+      to: memberEmail,
+    });
+
+    expect(notice.subject).toMatch(/^"Terms to decline" will be deleted on /);
+    expect(notice.text).toContain(`/envelopes/${envelopeId}`);
+
+    // Any administrator can cancel until then; the sender is told.
+    await page.getByRole("button", { name: "Cancel deletion" }).click();
+    await page
+      .getByRole("dialog", { name: "Cancel this deletion?" })
+      .getByRole("button", { name: "Cancel deletion" })
+      .click();
+    await expect(page.getByText(/Scheduled to be deleted on/)).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const latest = await waitForEmail({
+          template: "deletion_notice",
+          to: memberEmail,
+        });
+
+        return latest.subject;
+      })
+      .toBe('"Terms to decline" will not be deleted');
+
+    await scheduleDeletion("Never agreed.");
+
+    // The envelope itself stays until the wait is over.
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Terms to decline" }),
+    ).toBeVisible();
+
+    // The download, the request and its cancellation stay on record in the
+    // install's audit trail, with whose envelope it was.
     const audit = await page.request.get("/api/admin/audit");
     const { events } = (await audit.json()) as {
       events: { event: string; metadata: Record<string, unknown> | null }[];
     };
-    const deletion = events.find((event) => event.event === "envelope_deleted");
 
-    expect(deletion?.metadata).toMatchObject({
+    expect(
+      events.find((event) => event.event === "envelope_file_downloaded")
+        ?.metadata,
+    ).toMatchObject({
       envelopeId,
+      file: "evidence",
+      ownerEmail: memberEmail,
+    });
+    expect(
+      events.find((event) => event.event === "envelope_deletion_scheduled")
+        ?.metadata,
+    ).toMatchObject({
+      envelopeId,
+      ownerEmail: memberEmail,
       reason: "Never agreed.",
       status: "declined",
     });
+    expect(
+      events.find((event) => event.event === "envelope_deletion_cancelled")
+        ?.metadata,
+    ).toMatchObject({ envelopeId, ownerEmail: memberEmail });
   });
+});
+
+test("a long Text answer keeps the signing page within the window", async ({
+  browser,
+  page,
+}, testInfo) => {
+  const runId = String(Date.now());
+  const signerEmail = `long-answer+${runId}@example.com`;
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  await test.step("the sender sends a signature and a Text field", async () => {
+    const pdfPath = await writeSamplePdf(testInfo.outputPath("form.pdf"));
+
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Form with a long answer");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+
+    await page.getByLabel("Signer 1 name").fill("Lee Longanswer");
+    await page.getByLabel("Signer 1 email").fill(signerEmail);
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/prepare$/);
+
+    const placeField = async (tool: string, x: number, y: number) => {
+      await page.getByRole("button", { exact: true, name: tool }).click();
+
+      const target = page.getByLabel(`Place ${tool} on page 1`);
+      const box = await target.boundingBox();
+
+      expect(box).not.toBeNull();
+      await target.click({
+        position: { x: box!.width * x, y: box!.height * y },
+      });
+    };
+
+    await placeField("Signature", 0.3, 0.7);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await placeField("Text", 0.3, 0.4);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/review$/);
+    await page.getByRole("button", { name: "Send envelope" }).click();
+
+    const confirmation = page.getByRole("dialog", {
+      name: "Send this envelope?",
+    });
+
+    await confirmation.getByRole("checkbox").check();
+    await confirmation.getByRole("button", { name: "Send now" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+$/);
+  });
+
+  await test.step("typing a long unbroken answer does not widen the page", async () => {
+    const invitation = await waitForEmail({
+      template: "signing_invitation",
+      to: signerEmail,
+    });
+    // Narrower than the two-column layout, as in the report.
+    const signerContext = await browser.newContext({
+      viewport: { height: 900, width: 1200 },
+    });
+    const signerPage = await signerContext.newPage();
+
+    await signerPage.goto(extractLink(invitation.text, "/sign/"));
+
+    const consent = signerPage.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await expect(consent).toBeHidden();
+
+    const pdfPage = signerPage.getByRole("img", {
+      name: "Rendered PDF page 1",
+    });
+
+    await expect(pdfPage).toBeVisible();
+
+    const answer = signerPage.getByLabel("Enter text", { exact: true });
+    const measure = () =>
+      signerPage.evaluate(() => document.documentElement.scrollWidth);
+
+    await answer.fill("Short");
+    await expect(signerPage.getByText("Short", { exact: true })).toBeVisible();
+
+    const shortWidth = (await pdfPage.boundingBox())?.width ?? 0;
+
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    const longAnswer = "W".repeat(230);
+
+    await answer.fill(longAnswer);
+    await expect(
+      signerPage.getByText(longAnswer, { exact: true }),
+    ).toBeAttached();
+    expect(await measure()).toBeLessThanOrEqual(1200);
+    expect((await pdfPage.boundingBox())?.width).toBeCloseTo(shortWidth, 0);
+    // The whole answer is still there to edit.
+    await expect(answer).toHaveValue(longAnswer);
+
+    await answer.fill("Short again");
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    await signerContext.close();
+  });
+});
+
+test("with local disk storage a PDF just under 20 MB uploads, and a larger request is refused", async ({
+  page,
+}, testInfo) => {
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  await page.goto("/login");
+  await page.getByLabel("Email").fill(adminEmail);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Log in" }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+
+  await test.step("a 19 MB PDF, over Next.js's 10 MB default, makes a draft", async () => {
+    const pdfPath = await writeLargePdf(
+      testInfo.outputPath("large.pdf"),
+      19 * 1024 * 1024,
+    );
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Large agreement");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+  });
+
+  await test.step("a request over the limit gets the size message", async () => {
+    const response = await page.request.post("/api/envelopes", {
+      headers: { origin: new URL(page.url()).origin },
+      multipart: {
+        file: {
+          buffer: Buffer.alloc(22 * 1024 * 1024),
+          mimeType: "application/pdf",
+          name: "too-large.pdf",
+        },
+        title: "Too large",
+      },
+    });
+
+    expect(response.status()).toBe(413);
+    expect(await response.json()).toEqual({
+      error: "This file exceeds the 20 MB limit.",
+    });
+  });
+});
+
+test("an administrator makes an API key and a webhook, an app sends and downloads an envelope and hears each step, and revoking the key stops it", async ({
+  baseURL,
+  browser,
+  page,
+  playwright,
+}) => {
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    adminEmail =
+      (
+        await database.query<{ email: string }>(
+          `select email from public."user" where role = 'admin' order by "createdAt" limit 1`,
+        )
+      ).rows[0]?.email ?? "";
+    // This test's sign-in comes between others, so the two-step test after
+    // it would be the fourth sign-in in ten seconds.
+    await startSignInWindowAfresh(database);
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  // A separate client, with no session cookie: only the key gets it in.
+  const api = await playwright.request.newContext({ baseURL });
+  let key = "";
+
+  await test.step("the key is made in Settings and shown once", async () => {
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.goto("/settings");
+    await page.getByPlaceholder("For example: Billing app").fill("Billing app");
+    await page.getByRole("button", { name: "Create key" }).click();
+
+    key =
+      (await page.getByTestId("new-api-key").locator("code").textContent()) ??
+      "";
+    expect(key).toMatch(/^sdk_[A-Za-z0-9_-]{43}$/);
+    await page.getByRole("button", { name: "Done" }).click();
+    await expect(page.getByTestId("new-api-key")).toHaveCount(0);
+    await expect(
+      page.getByRole("list", { name: "API keys" }).getByText(key.slice(0, 12)),
+    ).toBeVisible();
+  });
+
+  await test.step("the API answers to the key and to nothing else", async () => {
+    const me = await api.get("/api/v1/me", {
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    expect(me.status()).toBe(200);
+    expect(me.headers()["ratelimit-limit"]).toBe("600");
+    expect(await me.json()).toMatchObject({
+      key: { name: "Billing app", scope: "write" },
+      user: { email: adminEmail },
+    });
+
+    const anonymous = await api.get("/api/v1/me");
+
+    expect(anonymous.status()).toBe(401);
+    expect(await anonymous.json()).toMatchObject({
+      error: { code: "unauthorized" },
+    });
+  });
+
+  const receiver = await startWebhookReceiver();
+  let webhookSecret = "";
+
+  await test.step("a webhook endpoint is added in Settings, and its test event arrives signed", async () => {
+    await page
+      .getByPlaceholder("https://app.example.com/webhooks/signudoc")
+      .fill(receiver.url);
+    await page
+      .getByPlaceholder("What this endpoint is for")
+      .fill("Billing app");
+    await page.getByRole("button", { name: "Add endpoint" }).click();
+
+    webhookSecret =
+      (await page
+        .getByTestId("new-webhook-secret")
+        .locator("code")
+        .textContent()) ?? "";
+    expect(webhookSecret).toMatch(/^whsec_/);
+    await page
+      .getByTestId("new-webhook-secret")
+      .getByRole("button", { name: "Done" })
+      .click();
+
+    const endpoints = page.getByRole("list", { name: "Webhook endpoints" });
+
+    await expect(endpoints.getByText(receiver.url)).toBeVisible();
+    await endpoints.getByRole("button", { name: "Send test" }).click();
+    await expect(page.getByText("The test event was delivered")).toBeVisible();
+    expect(receiver.received.map((webhook) => webhook.json.type)).toEqual([
+      "webhook.test",
+    ]);
+    expect(hasValidSignature(receiver.received[0]!, webhookSecret)).toBe(true);
+  });
+
+  await test.step("an app creates and sends an envelope, a signer signs, and the app downloads it", async () => {
+    const auth = { authorization: `Bearer ${key}` };
+    const signerEmail = `api-signer+${String(Date.now())}@example.com`;
+    const pdfPath = await writeSamplePdf(
+      test.info().outputPath("api-agreement.pdf"),
+    );
+    const { readFile } = await import("node:fs/promises");
+    const data = {
+      fields: [
+        {
+          height: 0.05,
+          page: 1,
+          signer: "client",
+          type: "signature",
+          width: 0.3,
+          x: 0.1,
+          y: 0.7,
+        },
+      ],
+      metadata: { invoice: "INV-1042" },
+      send: { expiresInDays: 7, permittedUseConfirmed: true },
+      signers: [{ email: signerEmail, name: "Casey Client", ref: "client" }],
+      title: "API service agreement",
+    };
+    const created = await api.post("/api/v1/envelopes", {
+      headers: { ...auth, "idempotency-key": "order-1042" },
+      multipart: {
+        data: JSON.stringify(data),
+        file: {
+          buffer: await readFile(pdfPath),
+          mimeType: "application/pdf",
+          name: "agreement.pdf",
+        },
+      },
+    });
+
+    expect(created.status()).toBe(201);
+
+    const envelope = (await created.json()) as {
+      id: string;
+      metadata: unknown;
+      signers: Array<{ ref: string; status: string }>;
+      status: string;
+    };
+
+    expect(envelope).toMatchObject({
+      metadata: { invoice: "INV-1042" },
+      signers: [{ ref: "client", status: "notified" }],
+      status: "sent",
+    });
+
+    // The same request again is the same envelope, not a second one.
+    const retried = await api.post("/api/v1/envelopes", {
+      headers: { ...auth, "idempotency-key": "order-1042" },
+      multipart: {
+        data: JSON.stringify(data),
+        file: {
+          buffer: await readFile(pdfPath),
+          mimeType: "application/pdf",
+          name: "agreement.pdf",
+        },
+      },
+    });
+
+    expect(retried.headers()["idempotent-replayed"]).toBe("true");
+    expect(((await retried.json()) as { id: string }).id).toBe(envelope.id);
+
+    const invitation = await waitForEmail({
+      template: "signing_invitation",
+      to: signerEmail,
+    });
+    const signer = await browser.newContext();
+    const signerPage = await signer.newPage();
+
+    await signerPage.goto(extractLink(invitation.text, "/sign/"));
+
+    const consent = signerPage.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await signerPage
+      .getByRole("button", { exact: true, name: "Signature" })
+      .click();
+    await signerPage
+      .getByRole("dialog", { name: "Add your signature" })
+      .getByRole("button", { name: "Apply signature" })
+      .click();
+    await signerPage.getByRole("button", { name: "Finish" }).click();
+    await signerPage
+      .getByRole("dialog", { name: "Finish signing?" })
+      .getByRole("button", { name: "Finish signing" })
+      .click();
+    await expect(signerPage).toHaveURL(/\/sign\/[^/]+\/done/);
+    await signer.close();
+
+    // A cut-off body, or JSON that is not an object, is refused, never
+    // read as "no reason given". Sent as bytes: Playwright would turn a
+    // string that is not JSON into a JSON string.
+    for (const data of [Buffer.from('{"reason":'), Buffer.from('"stop"')]) {
+      const refused = await api.post(`/api/v1/envelopes/${envelope.id}/void`, {
+        data,
+        headers: { ...auth, "content-type": "application/json" },
+      });
+
+      expect(refused.status(), await refused.text()).toBe(400);
+    }
+
+    const finished = await api.get(`/api/v1/envelopes/${envelope.id}`, {
+      headers: auth,
+    });
+
+    expect(await finished.json()).toMatchObject({
+      files: {
+        certificate: `/api/v1/envelopes/${envelope.id}/files/certificate`,
+        signed: `/api/v1/envelopes/${envelope.id}/files/signed`,
+      },
+      signers: [{ status: "signed" }],
+      status: "completed",
+    });
+
+    for (const file of ["signed", "certificate"]) {
+      const download = await api.get(
+        `/api/v1/envelopes/${envelope.id}/files/${file}`,
+        { headers: auth },
+      );
+
+      expect(download.status()).toBe(200);
+      expect(download.headers()["content-type"]).toContain("application/pdf");
+      expect((await download.body()).subarray(0, 5).toString()).toBe("%PDF-");
+    }
+
+    const events = (await (
+      await api.get(`/api/v1/envelopes/${envelope.id}/events`, {
+        headers: auth,
+      })
+    ).json()) as { data: Array<{ event: string }> };
+
+    expect(events.data.map((event) => event.event)).toEqual(
+      expect.arrayContaining([
+        "created",
+        "sent",
+        "viewed",
+        "signed",
+        "completed",
+      ]),
+    );
+
+    const list = (await (
+      await api.get("/api/v1/envelopes?status=completed&limit=5", {
+        headers: auth,
+      })
+    ).json()) as { data: Array<{ id: string }> };
+
+    expect(list.data.map((item) => item.id)).toContain(envelope.id);
+
+    // Each step reached the app, signed, carrying the envelope.
+    await expect
+      .poll(() =>
+        receiver.received
+          .filter((webhook) => webhook.json.type !== "webhook.test")
+          .map((webhook) => webhook.json.type)
+          .sort(),
+      )
+      .toEqual([
+        "envelope.completed",
+        "envelope.sent",
+        "signer.signed",
+        "signer.viewed",
+      ]);
+
+    for (const webhook of receiver.received) {
+      expect(hasValidSignature(webhook, webhookSecret)).toBe(true);
+    }
+
+    const completedHook = receiver.received.find(
+      (webhook) => webhook.json.type === "envelope.completed",
+    );
+
+    expect(completedHook?.json.data).toMatchObject({
+      envelope: {
+        files: { signed: `/api/v1/envelopes/${envelope.id}/files/signed` },
+        id: envelope.id,
+        metadata: { invoice: "INV-1042" },
+        status: "completed",
+      },
+      owner: { email: adminEmail },
+    });
+
+    const deliveries = (await (
+      await api.get("/api/v1/webhook-deliveries?type=envelope.completed", {
+        headers: auth,
+      })
+    ).json()) as { data: Array<{ envelopeId: string; status: string }> };
+
+    expect(deliveries.data[0]).toMatchObject({
+      envelopeId: envelope.id,
+      status: "delivered",
+    });
+
+    const openapi = await api.get("/api/v1/openapi.json");
+
+    expect(openapi.status()).toBe(200);
+    expect(((await openapi.json()) as { openapi: string }).openapi).toBe(
+      "3.1.0",
+    );
+  });
+
+  await test.step("a revoked key is refused at once", async () => {
+    await page.getByRole("button", { name: "Revoke Billing app" }).click();
+    await page.getByRole("button", { name: "Revoke", exact: true }).click();
+    await expect(
+      page.getByRole("list", { name: "API keys" }).getByText("Revoked"),
+    ).toBeVisible();
+
+    const refused = await api.get("/api/v1/me", {
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    expect(refused.status()).toBe(401);
+  });
+
+  await api.dispose();
+  await receiver.close();
+});
+
+test("an app shows the signing page in its own site, only on a site an administrator allowed, and hears that it was signed", async ({
+  baseURL,
+  browser,
+  page,
+  playwright,
+}) => {
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    adminEmail =
+      (
+        await database.query<{ email: string }>(
+          `select email from public."user" where role = 'admin' order by "createdAt" limit 1`,
+        )
+      ).rows[0]?.email ?? "";
+    // Like the API key test, this one signs in just before the two-step
+    // test: start the sign-in window afresh.
+    await startSignInWindowAfresh(database);
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  const api = await playwright.request.newContext({ baseURL });
+  const portal = await startEmbedParent();
+  const stranger = await startEmbedParent();
+  let key = "";
+
+  await test.step("an administrator makes a key and allows the app's site", async () => {
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.goto("/settings");
+    await page.getByPlaceholder("For example: Billing app").fill("Portal");
+    await page.getByRole("button", { name: "Create key" }).click();
+    key =
+      (await page.getByTestId("new-api-key").locator("code").textContent()) ??
+      "";
+    expect(key).toMatch(/^sdk_/);
+    await page.getByRole("button", { name: "Done" }).click();
+
+    await page
+      .getByPlaceholder("https://app.example.com", { exact: true })
+      .fill(portal.origin);
+    await page.getByRole("button", { name: "Allow site" }).click();
+    await expect(
+      page
+        .getByRole("list", { name: "Sites allowed to embed signing" })
+        .getByText(portal.origin),
+    ).toBeVisible();
+  });
+
+  const auth = () => ({ authorization: `Bearer ${key}` });
+  const signerEmail = `embedded-signer+${String(Date.now())}@example.com`;
+  let envelopeId = "";
+  let signerId = "";
+
+  await test.step("the app sends an envelope for embedded signing, and no email goes out", async () => {
+    const pdfPath = await writeSamplePdf(
+      test.info().outputPath("embedded-agreement.pdf"),
+    );
+    const { readFile } = await import("node:fs/promises");
+    const created = await api.post("/api/v1/envelopes", {
+      headers: auth(),
+      multipart: {
+        data: JSON.stringify({
+          fields: [
+            {
+              height: 0.05,
+              page: 1,
+              signer: "client",
+              type: "signature",
+              width: 0.3,
+              x: 0.1,
+              y: 0.7,
+            },
+          ],
+          send: { delivery: "embedded", permittedUseConfirmed: true },
+          signers: [
+            { email: signerEmail, name: "Robin Portal", ref: "client" },
+          ],
+          title: "Portal service agreement",
+        }),
+        file: {
+          buffer: await readFile(pdfPath),
+          mimeType: "application/pdf",
+          name: "agreement.pdf",
+        },
+      },
+    });
+
+    expect(created.status()).toBe(201);
+
+    const envelope = (await created.json()) as {
+      delivery: string;
+      id: string;
+      signers: Array<{ id: string; status: string }>;
+      status: string;
+    };
+
+    expect(envelope).toMatchObject({
+      delivery: "embedded",
+      signers: [{ status: "notified" }],
+      status: "sent",
+    });
+    envelopeId = envelope.id;
+    signerId = envelope.signers[0]!.id;
+  });
+
+  let link = "";
+
+  await test.step("a signing link is made only for an allowed site", async () => {
+    const path = `/api/v1/envelopes/${envelopeId}/signers/${signerId}/embed-link`;
+    const refused = await api.post(path, {
+      data: { origin: stranger.origin },
+      headers: auth(),
+    });
+
+    expect(refused.status()).toBe(403);
+
+    const made = await api.post(path, {
+      data: { origin: portal.origin },
+      headers: auth(),
+    });
+
+    expect(made.status()).toBe(201);
+
+    const body = (await made.json()) as { object: string; url: string };
+
+    expect(body.object).toBe("embed_link");
+    link = body.url;
+    expect(new URL(link).searchParams.get("origin")).toBe(portal.origin);
+  });
+
+  await test.step("another site cannot frame that link", async () => {
+    const strangerPage = await page.context().newPage();
+    const refusals: string[] = [];
+
+    strangerPage.on("console", (message) => {
+      if (/frame-ancestors/.test(message.text())) {
+        refusals.push(message.text());
+      }
+    });
+    await strangerPage.goto(stranger.pageFor(link));
+    await expect.poll(() => refusals.length).toBeGreaterThan(0);
+    await expect(
+      strangerPage
+        .frameLocator("#signing")
+        .getByRole("dialog", { name: "Before you sign" }),
+    ).toHaveCount(0);
+    await strangerPage.close();
+  });
+
+  await test.step("the signer signs inside the app's page, and the app is told", async () => {
+    const context = await browser.newContext();
+    const portalPage = await context.newPage();
+
+    await portalPage.goto(portal.pageFor(link));
+
+    const frame = portalPage.frameLocator("#signing");
+    const consent = frame.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await frame.getByRole("button", { exact: true, name: "Signature" }).click();
+    await frame
+      .getByRole("dialog", { name: "Add your signature" })
+      .getByRole("button", { name: "Apply signature" })
+      .click();
+    await frame.getByRole("button", { name: "Finish" }).click();
+    await frame
+      .getByRole("dialog", { name: "Finish signing?" })
+      .getByRole("button", { name: "Finish signing" })
+      .click();
+
+    await expect
+      .poll(() =>
+        portalPage.evaluate(() =>
+          (
+            window as unknown as {
+              signudocMessages: Array<{ data: { type?: string } }>;
+            }
+          ).signudocMessages.map((message) => message.data.type),
+        ),
+      )
+      .toContain("signudoc:signed");
+
+    const messages = await portalPage.evaluate(
+      () =>
+        (
+          window as unknown as {
+            signudocMessages: Array<{ data: unknown; origin: string }>;
+          }
+        ).signudocMessages,
+    );
+
+    expect(
+      messages.find(
+        (message) =>
+          (message.data as { type?: string }).type === "signudoc:signed",
+      ),
+    ).toMatchObject({
+      data: { envelopeId, signerId, type: "signudoc:signed" },
+      origin: new URL(baseURL!).origin,
+    });
+    // The frame moves on to the embedded done page, still inside the app.
+    await expect
+      .poll(() =>
+        portalPage
+          .frames()
+          .some((child) => /\/embed\/sign\/[^/]+\/done/.test(child.url())),
+      )
+      .toBe(true);
+    await context.close();
+  });
+
+  await test.step("the envelope is completed, and the signer was never emailed an invitation", async () => {
+    await expect
+      .poll(async () => {
+        const response = await api.get(`/api/v1/envelopes/${envelopeId}`, {
+          headers: auth(),
+        });
+
+        return ((await response.json()) as { status: string }).status;
+      })
+      .toBe("completed");
+
+    const { readdir, readFile } = await import("node:fs/promises");
+    const invitations: string[] = [];
+
+    for (const file of await readdir(e2eOutboxDir)) {
+      const message = JSON.parse(
+        await readFile(`${e2eOutboxDir}/${file}`, "utf8"),
+      ) as { template?: string; to?: string | string[] };
+
+      if (
+        message.template === "signing_invitation" &&
+        [message.to].flat().includes(signerEmail)
+      ) {
+        invitations.push(file);
+      }
+    }
+
+    expect(invitations).toEqual([]);
+  });
+
+  await api.dispose();
+  await portal.close();
+  await stranger.close();
 });
 
 test("two-step sign-in: an administrator sets it up and requires it of everyone", async ({

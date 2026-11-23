@@ -1,6 +1,6 @@
 import { PlusIcon, SearchIcon } from "lucide-react";
 import Link from "next/link";
-import type { ChangeEventHandler } from "react";
+import type { ChangeEventHandler, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 import type { DashboardEnvelopeListItem } from "@/lib/envelopes";
@@ -12,6 +12,36 @@ import { ShellButton, StaticShellButton } from "@/components/shared/form-shell";
 import { PageHeader } from "@/components/shared/page-header";
 
 export type DashboardShellState = "default" | "empty" | "error";
+
+/**
+ * Whose envelopes the dashboard lists: one's own, one's teams' too, or, for
+ * an administrator, everyone's.
+ */
+export type DashboardView = "all" | "mine" | "team";
+
+const dashboardViews: readonly DashboardView[] = ["mine", "team", "all"];
+
+const viewLabels: Record<DashboardView, string> = {
+  all: "Everyone's",
+  mine: "Mine",
+  team: "My team",
+};
+
+/** The view named in the address, or one's own envelopes. */
+export function parseDashboardView(value: string): DashboardView {
+  return dashboardViews.find((view) => view === value) ?? "mine";
+}
+
+/** The dashboard's address for one view. */
+export function dashboardViewHref(view: DashboardView): string {
+  return view === "mine" ? "/dashboard" : `/dashboard?view=${view}`;
+}
+
+/** Links to the pages before and after this one, when there are any. */
+export type DashboardPagination = {
+  newerHref?: string;
+  olderHref?: string;
+};
 
 export type DashboardFilter =
   "All" | "Draft" | "Sent" | "Completed" | "Declined" | "Voided";
@@ -59,6 +89,10 @@ const statusPillClasses: Record<EnvelopeStatus, string> = {
 
 type DashboardDocumentsHeaderProps = {
   interactive?: boolean;
+  /** Shown when there is more than one view to choose from. */
+  view?: DashboardView;
+  /** The views this person can choose from. */
+  views?: readonly DashboardView[];
 };
 
 type DashboardDocumentsPanelProps = {
@@ -70,8 +104,10 @@ type DashboardDocumentsPanelProps = {
   onReset?: () => void;
   onRetry?: () => void;
   onSearchChange?: ChangeEventHandler<HTMLInputElement>;
+  pagination?: DashboardPagination;
   searchValue: string;
   selectedFilter: DashboardFilter;
+  view?: DashboardView;
 };
 
 type EnvelopeGridProps = {
@@ -91,6 +127,8 @@ type ErrorBannerProps = {
 
 export function DashboardDocumentsHeader({
   interactive = true,
+  view,
+  views = [],
 }: DashboardDocumentsHeaderProps) {
   const label = (
     <>
@@ -104,17 +142,46 @@ export function DashboardDocumentsHeader({
   );
 
   return (
-    <PageHeader
-      action={
-        interactive ? (
-          <ShellButton href="/envelopes/new">{label}</ShellButton>
-        ) : (
-          <StaticShellButton>{label}</StaticShellButton>
-        )
-      }
-      description={documentsDescription}
-      title="Documents"
-    />
+    <>
+      <PageHeader
+        action={
+          interactive ? (
+            <ShellButton href="/envelopes/new">{label}</ShellButton>
+          ) : (
+            <StaticShellButton>{label}</StaticShellButton>
+          )
+        }
+        description={
+          view === "all"
+            ? "Every envelope in your organization, whoever sent it."
+            : view === "team"
+              ? "Your envelopes, and the ones your teammates have sent."
+              : documentsDescription
+        }
+        title={
+          view === "all"
+            ? "All envelopes"
+            : view === "team"
+              ? "Team envelopes"
+              : "Documents"
+        }
+      />
+      {view && interactive && views.length > 1 ? (
+        <nav aria-label="Whose envelopes" className="segmented self-start">
+          {views.map((option) => (
+            <Link
+              aria-current={view === option ? "page" : undefined}
+              className="segmented-item"
+              data-active={view === option}
+              href={dashboardViewHref(option)}
+              key={option}
+            >
+              {viewLabels[option]}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
+    </>
   );
 }
 
@@ -127,8 +194,10 @@ export function DashboardDocumentsPanel({
   onReset,
   onRetry,
   onSearchChange,
+  pagination,
   searchValue,
   selectedFilter,
+  view,
 }: DashboardDocumentsPanelProps) {
   const hasSeededEnvelopes = envelopes.length > 0;
 
@@ -169,19 +238,27 @@ export function DashboardDocumentsPanel({
           })}
         </div>
 
-        <label className="flex min-h-[2.625rem] w-full items-center gap-2.5 rounded-xl bg-white px-3.5 text-(--tertiary) transition focus-within:ring-3 focus-within:ring-ring/50 lg:w-[19rem]">
-          <SearchIcon aria-hidden="true" className="size-4 shrink-0" />
-          <input
-            aria-label="Search by title or email..."
-            className="min-w-0 flex-1 bg-transparent py-2 text-sm text-(--fg) outline-none placeholder:text-(--placeholder)"
-            onChange={interactive ? onSearchChange : undefined}
-            placeholder="Search by title or email..."
-            readOnly={!interactive}
-            tabIndex={interactive ? undefined : -1}
-            type="search"
-            value={searchValue}
-          />
-        </label>
+        {/* Typing narrows what is shown; Enter searches every envelope,
+            not only this page. */}
+        <SearchForm interactive={interactive}>
+          {view && view !== "mine" ? (
+            <input name="view" type="hidden" value={view} />
+          ) : null}
+          <label className="flex min-h-[2.625rem] w-full items-center gap-2.5 rounded-xl bg-white px-3.5 text-(--tertiary) transition focus-within:ring-3 focus-within:ring-ring/50">
+            <SearchIcon aria-hidden="true" className="size-4 shrink-0" />
+            <input
+              aria-label="Search by title or email..."
+              className="min-w-0 flex-1 bg-transparent py-2 text-sm text-(--fg) outline-none placeholder:text-(--placeholder)"
+              name="q"
+              onChange={interactive ? onSearchChange : undefined}
+              placeholder="Search by title or email..."
+              readOnly={!interactive}
+              tabIndex={interactive ? undefined : -1}
+              type="search"
+              value={searchValue}
+            />
+          </label>
+        </SearchForm>
       </div>
 
       {isError ? (
@@ -190,16 +267,56 @@ export function DashboardDocumentsPanel({
 
       {filteredEnvelopes.length > 0 ? (
         <EnvelopeGrid envelopes={filteredEnvelopes} interactive={interactive} />
-      ) : hasSeededEnvelopes ? (
+      ) : hasSeededEnvelopes || searchValue || pagination?.newerHref ? (
         <NoResultsState interactive={interactive} onReset={onReset} />
       ) : null}
 
-      {!isError && hasSeededEnvelopes ? (
-        <p className="px-1 text-[0.8125rem] text-(--tertiary)">
-          Showing {filteredEnvelopes.length} of {envelopes.length} envelopes
-        </p>
+      {!isError && (hasSeededEnvelopes || pagination?.newerHref) ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <p className="text-[0.8125rem] text-(--tertiary)">
+            Showing {filteredEnvelopes.length} of {envelopes.length} envelopes
+            {pagination?.newerHref || pagination?.olderHref
+              ? " on this page"
+              : ""}
+          </p>
+          {interactive && (pagination?.newerHref || pagination?.olderHref) ? (
+            <nav aria-label="Pages" className="flex items-center gap-2">
+              {pagination.newerHref ? (
+                <ShellButton href={pagination.newerHref} variant="secondary">
+                  Newer
+                </ShellButton>
+              ) : null}
+              {pagination.olderHref ? (
+                <ShellButton href={pagination.olderHref} variant="secondary">
+                  Older
+                </ShellButton>
+              ) : null}
+            </nav>
+          ) : null}
+        </div>
       ) : null}
     </section>
+  );
+}
+
+/** A real form on the dashboard; in the landing page's picture, a box. */
+function SearchForm({
+  children,
+  interactive,
+}: {
+  children: ReactNode;
+  interactive: boolean;
+}) {
+  const className = "w-full lg:w-[19rem]";
+
+  if (!interactive) {
+    return <div className={className}>{children}</div>;
+  }
+
+  return (
+    <form action="/dashboard" className={className} method="get" role="search">
+      {children}
+    </form>
   );
 }
 
@@ -266,6 +383,12 @@ function EnvelopeCard({
         >
           {envelope.title}
         </span>
+        {envelope.senderLabel ? (
+          <span className="block truncate text-[0.8125rem] text-(--secondary)">
+            <span className="sr-only">Sent by </span>
+            {envelope.senderLabel}
+          </span>
+        ) : null}
         <span className="block truncate text-[0.8125rem] text-(--tertiary)">
           {envelope.contextLine}
         </span>

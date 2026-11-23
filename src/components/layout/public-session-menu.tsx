@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { authClient } from "@/lib/auth/client";
 import { cn } from "@/lib/cn";
+import { getInitials } from "@/lib/initials";
 
 type PublicSessionMenuProps = {
   align?: "center" | "end" | "start";
@@ -35,7 +36,10 @@ export function PublicSessionMenu({
     return <>{children}</>;
   }
 
-  const initials = getInitials(session.user.name);
+  const initials = getInitials(session.user.name, {
+    max: 2,
+    singleWordLength: 2,
+  });
 
   async function handleSignOut() {
     if (isSigningOut) {
@@ -98,16 +102,4 @@ export function PublicSessionMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-function getInitials(name: string) {
-  const trimmedName = name.trim();
-
-  if (!trimmedName) {
-    return "";
-  }
-
-  const [first = "", second = ""] = trimmedName.split(/\s+/, 2);
-
-  return `${first[0] ?? ""}${second[0] ?? first[1] ?? ""}`.toUpperCase();
 }

@@ -22,12 +22,15 @@ export type VerifyResult =
       fileKind: "signed-document" | "certificate";
       finishedAt: number | null;
       match: true;
+      /** People who approved or rejected instead of signing. */
+      approverCount: number;
       signerCount: number;
       status: "completed" | "declined" | "voided";
       title: string;
     };
 
 type VerifyRow = {
+  approverCount: number;
   completedAt: number | null;
   declinedAt: number | null;
   envelopeId: string;
@@ -57,7 +60,8 @@ export async function verifyDocumentHash(
         e.signed_pdf_sha256 AS "signedPdfSha256",
         e.evidence_sha256 AS "evidenceSha256",
         e.recipient_evidence_sha256 AS "recipientEvidenceSha256",
-        (SELECT count(*)::int FROM signers s WHERE s.envelope_id = e.id AND s.role = 'signer') AS "signerCount"
+        (SELECT count(*)::int FROM signers s WHERE s.envelope_id = e.id AND s.role = 'signer') AS "signerCount",
+        (SELECT count(*)::int FROM signers s WHERE s.envelope_id = e.id AND s.role = 'approver') AS "approverCount"
       FROM envelopes e
       WHERE e.signed_pdf_sha256 = $1
          OR e.evidence_sha256 = $1
@@ -72,6 +76,7 @@ export async function verifyDocumentHash(
   }
 
   return {
+    approverCount: row.approverCount,
     envelopeId: row.envelopeId,
     fileKind:
       row.signedPdfSha256 === sha256 ? "signed-document" : "certificate",

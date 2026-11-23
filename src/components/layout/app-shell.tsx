@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { authClient } from "@/lib/auth/client";
 import { cn } from "@/lib/cn";
+import { getInitials } from "@/lib/initials";
 
 type AppShellProps = {
   children: ReactNode;
@@ -42,7 +43,7 @@ export function AppShell({
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const currentSection = resolveSection(pathname);
-  const initials = getInitials(user.name);
+  const initials = getInitials(user.name, { max: 2 }) || "SU";
 
   async function handleSignOut() {
     if (isSigningOut) {
@@ -215,18 +216,4 @@ function resolveSection(pathname: string): ShellSection {
   }
 
   return "workspace";
-}
-
-function getInitials(name: string) {
-  const segments = name
-    .split(/\s+/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .slice(0, 2);
-
-  if (segments.length === 0) {
-    return "SU";
-  }
-
-  return segments.map((segment) => segment[0]?.toUpperCase() ?? "").join("");
 }

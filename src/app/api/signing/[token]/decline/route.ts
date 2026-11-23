@@ -14,7 +14,7 @@ import {
 } from "@/lib/signing";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import {
@@ -33,7 +33,7 @@ export async function POST(
   context: SigningDeclineRouteContext,
 ) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "signing_decline",
     key: buildRateLimitKey([
       "signing-decline",

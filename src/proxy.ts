@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
+import { frameAncestorsFor } from "@/lib/embed-origin";
 import { supportsDirectUploads } from "@/lib/services/storage/driver";
 
 const DEFAULT_PERMISSIONS_POLICY = [
@@ -48,13 +49,13 @@ function resolveBlobUploadSource() {
   return `${apiUrl.replace(/\/+$/, "")}/`;
 }
 
-function buildContentSecurityPolicy() {
+function buildContentSecurityPolicy(frameAncestors: string) {
   const preview = isVercelPreview();
   const botProtection = process.env.NEXT_PUBLIC_BOTID === "1";
   const directives: Array<[name: string, sources: Array<string | false>]> = [
     ["default-src", ["'self'"]],
     ["base-uri", ["'self'"]],
-    ["frame-ancestors", ["'none'"]],
+    ["frame-ancestors", [frameAncestors]],
     ["form-action", ["'self'"]],
     ["object-src", ["'none'"]],
     [
@@ -119,12 +120,26 @@ function buildContentSecurityPolicy() {
     .join("; ");
 }
 
-function applySecurityHeaders(response: NextResponse, pathname: string) {
-  response.headers.set("Content-Security-Policy", buildContentSecurityPolicy());
+function applySecurityHeaders(
+  response: NextResponse,
+  pathname: string,
+  searchParams: URLSearchParams,
+) {
+  // Only an embedded signing page may be framed, and only by the site its
+  // link names (see src/lib/embed-origin.ts). Everything else, never.
+  const frameAncestors = frameAncestorsFor(pathname, searchParams);
+
+  response.headers.set(
+    "Content-Security-Policy",
+    buildContentSecurityPolicy(frameAncestors),
+  );
   response.headers.set("Permissions-Policy", DEFAULT_PERMISSIONS_POLICY);
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   response.headers.set("X-Content-Type-Options", "nosniff");
-  response.headers.set("X-Frame-Options", "DENY");
+
+  if (frameAncestors === "'none'") {
+    response.headers.set("X-Frame-Options", "DENY");
+  }
 
   if (isProductionEnvironment()) {
     response.headers.set(
@@ -135,6 +150,7 @@ function applySecurityHeaders(response: NextResponse, pathname: string) {
 
   if (
     !pathname.startsWith("/sign/") &&
+    !pathname.startsWith("/embed/sign/") &&
     !pathname.startsWith("/api/signing/") &&
     !pathname.startsWith("/api/download/") &&
     !pathname.startsWith("/download/")
@@ -161,7 +177,11 @@ function applySecurityHeaders(response: NextResponse, pathname: string) {
 
 export function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  return applySecurityHeaders(NextResponse.next(), pathname);
+  return applySecurityHeaders(
+    NextResponse.next(),
+    pathname,
+    request.nextUrl.searchParams,
+  );
 }
 
 export const config = {

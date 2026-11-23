@@ -42,6 +42,7 @@ const OID = {
   sha256: "2.16.840.1.101.3.4.2.1",
   sha256WithRsa: "1.2.840.113549.1.1.11",
   signedData: "1.2.840.113549.1.7.2",
+  signingCertificate: "1.2.840.113549.1.9.16.2.12",
   signingCertificateV2: "1.2.840.113549.1.9.16.2.47",
   tstInfo: "1.2.840.113549.1.9.16.1.4",
 } as const;
@@ -443,6 +444,20 @@ export async function startTestPki(): Promise<TestPki> {
       der.sequence(
         der.oid(OID.messageDigest),
         der.set(der.octets(createHash("sha256").update(tstInfo).digest())),
+      ),
+      // macOS ships LibreSSL's openssl ts -verify, which checks ESSCertID
+      // (v1), while OpenSSL checks ESSCertIDv2.
+      der.sequence(
+        der.oid(OID.signingCertificate),
+        der.set(
+          der.sequence(
+            der.sequence(
+              der.sequence(
+                der.octets(createHash("sha1").update(tsaDer).digest()),
+              ),
+            ),
+          ),
+        ),
       ),
       der.sequence(
         der.oid(OID.signingCertificateV2),

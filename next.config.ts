@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 
 import type { NextConfig } from "next";
 
+import { MAX_REQUEST_BODY_BYTES } from "./src/lib/types/domain.ts";
+
 // The version this deployment runs, compared with the latest release by
 // "Check for updates" in Settings (src/lib/software-update.ts).
 const { version } = JSON.parse(readFileSync("./package.json", "utf8")) as {
@@ -17,6 +19,14 @@ const nextConfig: NextConfig = {
     // src/lib/security/botid.ts.
     NEXT_PUBLIC_BOTID:
       process.env.VERCEL === "1" && process.env.BOTID === "1" ? "1" : "",
+  },
+  experimental: {
+    // Every request passes through the Proxy (src/proxy.ts), and Next.js
+    // keeps only the first 10 MB of a body that does. With local disk
+    // storage the PDF is sent in the request itself, so the limit has to
+    // fit a PDF at the 20 MB upload limit and the rest of the form.
+    // https://nextjs.org/docs/app/api-reference/config/next-config-js/proxyClientMaxBodySize
+    proxyClientMaxBodySize: MAX_REQUEST_BODY_BYTES,
   },
   images: {
     unoptimized: true,

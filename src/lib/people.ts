@@ -6,6 +6,9 @@ import {
   queryOne,
   withTransaction,
 } from "./db/connection.ts";
+import { revokeApiKeysForUser } from "./api-keys.ts";
+import { CURRENT_IDENTITY_VERIFIED_AT_SQL } from "./part11.ts";
+import type { RequestClient } from "./security/request.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 
 // The accounts on this install and who among them is an administrator.
@@ -16,7 +19,7 @@ import { recordSystemAuditEvent } from "./services/system-audit.ts";
 // account is not on its way to being closed.
 
 /** Serializes role changes, so two removals cannot both leave "one more". */
-const ROLE_CHANGE_LOCK_ID = 746108324;
+export const ROLE_CHANGE_LOCK_ID = 746108324;
 const MAX_LISTED_PEOPLE = 500;
 const MAX_SEARCH_LENGTH = 100;
 
@@ -86,7 +89,7 @@ const PERSON_COLUMNS = `
   u.role,
   u."emailVerified" AS "emailVerified",
   u."createdAt" AS "createdAt",
-  u.identity_verified_at AS "identityVerifiedAt",
+  ${CURRENT_IDENTITY_VERIFIED_AT_SQL} AS "identityVerifiedAt",
   u.identity_verification_note AS "identityVerificationNote",
   u.signing_locked_at AS "signingLockedAt",
   u."twoFactorEnabled" AS "twoFactorEnabled",
@@ -222,6 +225,7 @@ export async function setPersonRole(
   targetUserId: string,
   role: PersonRole,
   database: DbPool = getDb(),
+  client: RequestClient = {},
 ): Promise<Person> {
   return withTransaction(async (tx) => {
     await tx.query("SELECT pg_advisory_xact_lock($1)", [ROLE_CHANGE_LOCK_ID]);
@@ -282,11 +286,25 @@ export async function setPersonRole(
       `UPDATE "user" SET role = $1, "updatedAt" = now() WHERE id = $2`,
       [role, targetUserId],
     );
+
+    if (role === "user") {
+      // A key acts as its administrator. One who is no longer one loses
+      // their keys for good, so making them one again later does not
+      // quietly bring old keys back. Done before the audit event below:
+      // revokeApiKey locks a key row and then the audit chain, so this
+      // takes them in the same order and the two cannot deadlock.
+      await revokeApiKeysForUser(targetUserId, "role_removed", tx, {
+        email: actor.email,
+        userId: actingUserId,
+      });
+    }
+
     await recordSystemAuditEvent(
       {
         actorEmail: actor.email,
         actorUserId: actingUserId,
         event: "role_changed",
+        ipAddress: client.ipAddress ?? null,
         metadata: {
           from: target.role,
           targetEmail: target.email,
@@ -294,6 +312,7 @@ export async function setPersonRole(
           to: role,
         },
         targetUserId,
+        userAgent: client.userAgent ?? null,
       },
       tx,
     );

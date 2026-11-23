@@ -27,9 +27,7 @@ async function openDraftPdfCacheDatabase(): Promise<IDBDatabase | null> {
     );
 
     request.onerror = () => {
-      reject(
-        request.error ?? new Error("Unable to open the draft PDF cache."),
-      );
+      reject(request.error ?? new Error("Unable to open the draft PDF cache."));
     };
 
     request.onupgradeneeded = () => {
@@ -63,7 +61,8 @@ function runDraftPdfCacheTransaction<T>(
 
     request.onerror = () => {
       reject(
-        request.error ?? new Error("Unable to complete the draft PDF cache request."),
+        request.error ??
+          new Error("Unable to complete the draft PDF cache request."),
       );
     };
 
@@ -128,9 +127,7 @@ export async function getCachedDraftPdfBlob(
   return record.blob;
 }
 
-async function deleteCachedDraftPdfBlob(
-  envelopeId: string,
-): Promise<void> {
+async function deleteCachedDraftPdfBlob(envelopeId: string): Promise<void> {
   const database = await openDraftPdfCacheDatabase();
 
   if (!database) {

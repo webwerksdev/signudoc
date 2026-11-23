@@ -12,7 +12,12 @@ import {
   applyRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
-import { getClientIpAddress, getRequestPathname } from "@/lib/security/request";
+import { getDb } from "@/lib/db/connection";
+import {
+  getClientIpAddress,
+  getRequestClient,
+  getRequestPathname,
+} from "@/lib/security/request";
 
 type PersonRouteContext = {
   params: Promise<{
@@ -63,7 +68,13 @@ export async function PATCH(request: Request, context: PersonRouteContext) {
   }
 
   try {
-    const person = await setPersonRole(session.user.id, id, role);
+    const person = await setPersonRole(
+      session.user.id,
+      id,
+      role,
+      getDb(),
+      getRequestClient(request.headers),
+    );
 
     logSecurityEvent("info", {
       category: "people_role_changed",

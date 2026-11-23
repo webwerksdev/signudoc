@@ -1,6 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import { deleteExpiredIdempotencyKeys } from "./api/idempotency.ts";
 import { getDb, type DbPool } from "./db/connection.ts";
+import { deleteOldWebhookDeliveries } from "./webhooks/log.ts";
+import {
+  runScheduledEnvelopeDeletions,
+  type ScheduledDeletionSummary,
+} from "./envelope-deletion.ts";
 import {
   envelopeScheduleFailed,
   runEnvelopeSchedule,
@@ -17,8 +23,9 @@ import { isMissingSchemaError } from "./settings.ts";
 import { getEnv, type EnvSource } from "./utils/env.ts";
 
 // The daily job. First the cleanup: stale drafts, queued account deletions,
-// expired download links and finished rate limit windows. Then the envelopes
-// that are out for signature: see envelope-schedule.ts.
+// expired download links and finished rate limit windows. Then the
+// deletions administrators scheduled (envelope-deletion.ts), and the
+// envelopes that are out for signature (envelope-schedule.ts).
 //
 // On Vercel it is called by a cron job (see vercel.json). A click-to-deploy
 // install has no secret for that call, because nobody typed one in, so the
@@ -39,6 +46,8 @@ export type RetentionCaller = "anonymous" | "authorized" | "denied";
 
 export type RetentionJobOutcome =
   | {
+      /** Null when that part could not run. The cleanup still counts. */
+      deletions: ScheduledDeletionSummary | null;
       /** Null when that part could not run. The cleanup still counts. */
       schedule: EnvelopeScheduleSummary | null;
       status: "ran";
@@ -171,6 +180,33 @@ export async function runRetentionJob({
       }
     });
 
+    await deleteExpiredIdempotencyKeys(database).catch((error: unknown) => {
+      // A database from before the API has no table to clear.
+      if (!isMissingSchemaError(error)) {
+        console.error("Clearing old API idempotency keys failed:", error);
+      }
+    });
+
+    await deleteOldWebhookDeliveries(database).catch((error: unknown) => {
+      if (!isMissingSchemaError(error)) {
+        console.error("Clearing old webhook deliveries failed:", error);
+      }
+    });
+
+    const deletions = await runScheduledEnvelopeDeletions({
+      database,
+      emailService,
+      storageService,
+    }).catch((error: unknown) => {
+      // A database from before scheduled deletions has none to run.
+      if (!isMissingSchemaError(error)) {
+        console.error("The scheduled envelope deletions failed:", error);
+        return null;
+      }
+
+      return { deleted: 0, failures: [], noticeFailures: [], noticesSent: 0 };
+    });
+
     const schedule = await runEnvelopeSchedule({
       database,
       emailService,
@@ -192,7 +228,7 @@ export async function runRetentionJob({
       };
     });
 
-    return { schedule, status: "ran", summary };
+    return { deletions, schedule, status: "ran", summary };
   } finally {
     await lockClient.query("rollback").catch(() => undefined);
     lockClient.release();
@@ -213,6 +249,9 @@ export function retentionJobFailed(
 ): boolean {
   return (
     retentionSweepFailed(outcome.summary) ||
+    outcome.deletions === null ||
+    outcome.deletions.failures.length > 0 ||
+    outcome.deletions.noticeFailures.length > 0 ||
     outcome.schedule === null ||
     envelopeScheduleFailed(outcome.schedule)
   );

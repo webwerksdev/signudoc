@@ -4,10 +4,18 @@ import { PublicLegalFooter } from "@/components/layout/public-legal-links";
 const fallbackEnvelopeTitle = "this document";
 
 type SigningDoneShellProps = {
+  /** An approver approved, rather than a signer signing. */
+  approved?: boolean;
+  /** Shown inside another app's page, which carries on from here. */
+  embedded?: boolean;
   envelopeTitle?: string | null;
 };
 
-export function SigningDoneShell({ envelopeTitle }: SigningDoneShellProps) {
+export function SigningDoneShell({
+  approved = false,
+  embedded = false,
+  envelopeTitle,
+}: SigningDoneShellProps) {
   const resolvedEnvelopeTitle =
     envelopeTitle && envelopeTitle.trim().length > 0
       ? envelopeTitle.trim()
@@ -50,7 +58,7 @@ export function SigningDoneShell({ envelopeTitle }: SigningDoneShellProps) {
             You&apos;re all done.
           </h1>
           <p className="mx-auto mt-4 max-w-[480px] text-base leading-7 text-(--secondary)">
-            Your signature has been recorded for{" "}
+            Your {approved ? "approval" : "signature"} has been recorded for{" "}
             <span className="font-bold text-(--fg)">
               &quot;{resolvedEnvelopeTitle}&quot;
             </span>
@@ -60,9 +68,11 @@ export function SigningDoneShell({ envelopeTitle }: SigningDoneShellProps) {
             You&apos;ll receive an email with the signed document once all
             parties have signed.
           </p>
-          <p className="mt-8 inline-flex rounded-full bg-(--surface) px-4 py-2 text-sm font-semibold text-(--secondary)">
-            You can close this tab.
-          </p>
+          {embedded ? null : (
+            <p className="mt-8 inline-flex rounded-full bg-(--surface) px-4 py-2 text-sm font-semibold text-(--secondary)">
+              You can close this tab.
+            </p>
+          )}
         </section>
       </main>
 

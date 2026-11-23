@@ -158,6 +158,12 @@ export const fieldPlacementListSchema = z
   });
 
 export const replaceFieldsSchema = z.object({
+  /**
+   * The field list's revision the editor last saw. When it is given and the
+   * list has been saved since, the save is refused instead of overwriting
+   * the newer list. Left out, the save always goes through.
+   */
+  expectedRevision: z.number().int().min(0).optional(),
   fields: fieldPlacementListSchema,
 });
 
@@ -168,6 +174,8 @@ export const replaceFieldsResponseSchema = z.object({
       id: idSchema,
     }),
   ),
+  /** The field list's revision after this save. */
+  fieldsRevision: z.number().int().min(0),
   redirectPath: z.string().trim().min(1),
   updatedAt: unixTimestampSchema,
 });

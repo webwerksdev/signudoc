@@ -1,5 +1,6 @@
 import { buildBranding, type Branding } from "./branding.ts";
 import {
+  afterCommit,
   type DbExecutor,
   type DbPool,
   getDb,
@@ -26,6 +27,12 @@ export type AppSettings = {
   allowedEmailDomains: string[];
   /** The install's own color as "#rrggbb", or null for the default. */
   brandColor: string | null;
+  /**
+   * The administrator's own words for what a signer reads and agrees to
+   * before signing, or null for the built-in disclosure. See
+   * electronic-records-disclosure.ts.
+   */
+  consentDisclosure: string | null;
   emailReadyAt: number | null;
   /**
    * A short hash of the install's logo, or null when it has none. The logo
@@ -97,6 +104,7 @@ export type SetupRequiredDecision = {
 type AppSettingsRow = {
   allowed_email_domains: string[] | null;
   brand_color: string | null;
+  consent_disclosure: string | null;
   email_ready_at: number | null;
   logo_hash: string | null;
   organization_name: string | null;
@@ -137,6 +145,7 @@ const LATER_SETTINGS_COLUMNS = [
   ["part11_mode"], // 20261115090000_part11_mode
   ["require_two_factor"], // 20261117090000_sign_in_security
   ["session_idle_minutes", "session_max_hours"], // 20261117100000_session_controls
+  ["consent_disclosure"], // 20261119130000_consent_disclosure
 ] as const;
 
 type LaterSettingsColumn = (typeof LATER_SETTINGS_COLUMNS)[number][number];
@@ -161,6 +170,7 @@ const SETTINGS_COLUMNS = settingsColumnsAfter(LATER_SETTINGS_COLUMNS.length);
 const UNSET_SETTINGS: AppSettings = {
   allowedEmailDomains: [],
   brandColor: null,
+  consentDisclosure: null,
   emailReadyAt: null,
   logoVersion: null,
   organizationName: null,
@@ -183,6 +193,13 @@ const SETTINGS_CACHE_MS = 30_000;
 const SETUP_COMPLETE_CACHE_MS = 60_000;
 
 type SettingsCache = {
+  /**
+   * Counts the clears, so a read that was already under way when the
+   * settings changed does not put what it read back into the cache.
+   * Optional because a cache made by an earlier copy of this module in the
+   * same process (a dev reload) has none.
+   */
+  generation?: number;
   settings: { expiresAt: number; value: AppSettings | null } | null;
   setupCompleteUntil: number;
 };
@@ -194,11 +211,13 @@ declare global {
 // Kept on globalThis, like the rate limit store, so every copy of this
 // module in one process shares it and a change clears it for all of them.
 const cache: SettingsCache = (globalThis.__signudocSettingsCache ??= {
+  generation: 0,
   settings: null,
   setupCompleteUntil: 0,
 });
 
 export function invalidateSettingsCache() {
+  cache.generation = (cache.generation ?? 0) + 1;
   cache.settings = null;
   cache.setupCompleteUntil = 0;
 }
@@ -230,6 +249,7 @@ function mapSettingsRow(row: StoredSettingsRow): AppSettings {
   return {
     allowedEmailDomains: row.allowed_email_domains ?? [],
     brandColor: row.brand_color ?? null,
+    consentDisclosure: row.consent_disclosure ?? null,
     emailReadyAt: row.email_ready_at,
     logoVersion: row.logo_hash ?? null,
     organizationName: row.organization_name,
@@ -295,9 +315,14 @@ async function getStoredSettings(): Promise<AppSettings | null> {
     return cache.settings.value;
   }
 
+  const generation = cache.generation ?? 0;
   const value = await readStoredSettings();
 
-  cache.settings = { expiresAt: now + SETTINGS_CACHE_MS, value };
+  // Settings saved while this read waited may be newer than what it read:
+  // use it for this request, but leave the cache to the next read.
+  if ((cache.generation ?? 0) === generation) {
+    cache.settings = { expiresAt: now + SETTINGS_CACHE_MS, value };
+  }
 
   return value;
 }
@@ -308,10 +333,13 @@ export function resolveSettings(
 ): ResolvedSettings {
   const emailEnv = getEnv(env).email;
   const settings = stored ?? UNSET_SETTINGS;
+  const hosted = isHostedMode(env);
 
   return {
     ...settings,
-    hosted: isHostedMode(env),
+    // The hosted service shows its own disclosure whatever is stored.
+    consentDisclosure: hosted ? null : settings.consentDisclosure,
+    hosted,
     senderAddress: emailEnv.senderAddress ?? settings.senderAddress,
     senderAddressFromEnv: emailEnv.senderAddress !== undefined,
     supportAddress: emailEnv.supportAddress ?? settings.supportAddress,
@@ -405,10 +433,11 @@ async function saveSettingsLocked(
         require_two_factor,
         session_idle_minutes,
         session_max_hours,
+        consent_disclosure,
         created_at,
         updated_at
       )
-      values (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $11, $12, $13, $14, $15, $16, $10, $10)
+      values (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $11, $12, $13, $14, $15, $16, $17, $10, $10)
       on conflict (id) do update set
         allowed_email_domains = excluded.allowed_email_domains,
         email_ready_at = excluded.email_ready_at,
@@ -425,6 +454,7 @@ async function saveSettingsLocked(
         require_two_factor = excluded.require_two_factor,
         session_idle_minutes = excluded.session_idle_minutes,
         session_max_hours = excluded.session_max_hours,
+        consent_disclosure = excluded.consent_disclosure,
         updated_at = excluded.updated_at
       returning ${SETTINGS_COLUMNS}
     `,
@@ -445,10 +475,13 @@ async function saveSettingsLocked(
       next.requireTwoFactor,
       next.sessionIdleMinutes,
       next.sessionMaxHours,
+      next.consentDisclosure,
     ],
   );
 
-  invalidateSettingsCache();
+  // Inside a transaction, clear once it commits: a page that read the old row
+  // in between would otherwise keep it cached.
+  afterCommit(database, invalidateSettingsCache);
 
   return row ? mapSettingsRow(row) : next;
 }

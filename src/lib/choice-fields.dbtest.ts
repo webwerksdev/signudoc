@@ -288,3 +288,49 @@ test("the database itself keeps choices and groups where they belong", async () 
   await insert("radio", null, "group-1");
   await insert("number", null, null);
 });
+
+test("a dropdown too small to show its choices readably is not sent", async () => {
+  const { casey, envelopeId, riley, userId } = await createDraft();
+  const choices = [
+    "Approved with the conditions listed in the schedule",
+    "Rejected until the landlord answers the open questions",
+  ];
+  const save = (dropdown: Record<string, unknown>) =>
+    replaceDraftEnvelopeFields(
+      userId,
+      envelopeId,
+      {
+        fields: [
+          field(riley, "signature", 0.1),
+          field(casey, "signature", 0.15),
+          field(riley, "dropdown", 0.3, { options: choices, ...dropdown }),
+        ],
+      },
+      database,
+    );
+  const send = () =>
+    sendDraftEnvelope(
+      userId,
+      envelopeId,
+      { senderEmail: "sam@example.test", senderName: "Sam Sender" },
+      { database },
+    );
+
+  await save({ height: 0.012, width: 0.05 });
+  await assert.rejects(
+    send(),
+    (error: unknown) =>
+      error instanceof EnvelopeMutationError &&
+      error.statusCode === 400 &&
+      /dropdown for Riley Recipient on page 1 is too small/.test(error.message),
+  );
+
+  // Wide enough, the dropdown is no reason not to send.
+  await save({ height: 0.03, width: 0.6 });
+  await send().catch((error: unknown) => {
+    assert.doesNotMatch(
+      error instanceof Error ? error.message : String(error),
+      /too small to show its choices/,
+    );
+  });
+});

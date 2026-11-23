@@ -13,6 +13,7 @@ import {
 } from "../db/connection.ts";
 import { logAuditRecord } from "../security/logging.ts";
 import { canonicalJson } from "../utils/canonical-json.ts";
+import { enqueueWebhookDeliveries } from "../webhooks/outbox.ts";
 
 export type AuditEventMetadata = Record<string, unknown> | null;
 
@@ -261,6 +262,18 @@ async function insertChainedAuditEvent(
   afterCommit(database, () => {
     logAuditRecord({ ...fields, rowHash, trail: "envelope" });
   });
+
+  // In the same transaction, so a webhook exists exactly when its event does.
+  await enqueueWebhookDeliveries(
+    {
+      auditEventId: id,
+      createdAt,
+      envelopeId: input.envelopeId,
+      event: input.event,
+      metadata: fields.metadata,
+    },
+    database,
+  );
 
   return auditEventRecordSchema.parse({
     actorEmail: fields.actorEmail,

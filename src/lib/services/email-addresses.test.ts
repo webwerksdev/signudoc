@@ -56,6 +56,19 @@ test("characters that mean something in an email header are dropped from the nam
   );
 });
 
+test("a long name is cut without splitting an emoji", () => {
+  const senderAddress = buildEmailAddresses({
+    ...base,
+    organizationName: `${"Acme ".repeat(15)}Acme😀`,
+  }).senderAddress;
+
+  assert.equal(
+    senderAddress,
+    `${"Acme ".repeat(15)}Acme <onboarding@resend.dev>`,
+  );
+  assert.equal(senderAddress, senderAddress.toWellFormed());
+});
+
 test("an install with no name, and the hosted service, send as SignuDoc", () => {
   assert.equal(
     buildEmailAddresses({ ...base, organizationName: null }).senderAddress,

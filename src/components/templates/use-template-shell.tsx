@@ -210,8 +210,21 @@ export function UseTemplateShell({
                       className="size-2 rounded-full"
                       style={{ backgroundColor: palette.color }}
                     />
-                    {index + 1}. {role.name}
+                    {role.step ?? index + 1}. {role.name}
                   </span>
+                  {index > 0 &&
+                  role.step !== undefined &&
+                  template.roles[index - 1]?.step === role.step ? (
+                    <p className="mt-2 text-[0.8125rem] leading-5 text-(--secondary)">
+                      Signs at the same time as{" "}
+                      {template.roles[index - 1]?.name}.
+                    </p>
+                  ) : null}
+                  {role.kind === "approver" ? (
+                    <p className="mt-2 text-[0.8125rem] leading-5 text-(--secondary)">
+                      Approves or rejects the document, with no fields.
+                    </p>
+                  ) : null}
 
                   <div className="mt-3 grid gap-x-4 gap-y-3 md:grid-cols-2">
                     <label className="grid auto-rows-min gap-1.5">

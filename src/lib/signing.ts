@@ -28,8 +28,10 @@ import {
   type SigningSubmission,
 } from "./schemas/field.ts";
 import {
+  approvalSubmissionSchema,
   signerCheckRequestSchema,
   signerConsentRequestSchema,
+  signingFieldFitRequestSchema,
   signingPayloadSchema,
   signingDeclineResponseSchema,
   type SigningVerificationState,
@@ -44,7 +46,11 @@ import {
   signerRecordSchema,
   type CopyRecipientRecord,
 } from "./schemas/signer.ts";
-import { getBranding } from "./settings.ts";
+import {
+  getBranding,
+  readStoredSettings,
+  resolveSettings,
+} from "./settings.ts";
 import {
   checkSigningCredentials,
   MAX_SIGNING_PASSWORD_ATTEMPTS,
@@ -53,11 +59,13 @@ import {
 } from "./part11.ts";
 import {
   listAuditEventsForEnvelope,
+  lockEnvelopeAuditChain,
   recordAuditEvent,
   recordEmailSent,
 } from "./services/audit.ts";
 import {
   createEmailService,
+  createLazyEmailService,
   fitsAsAttachments,
   type EmailAttachment,
   type EmailService,
@@ -66,15 +74,14 @@ import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { hashOpaqueToken } from "./services/opaque-tokens.ts";
 import {
   finalizeEnvelope,
+  findTypedValueTooLongForField,
   loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
 } from "./services/pdf-finalize.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
-import {
-  issueSigningLink,
-  type IssuedSigningLink,
-} from "./services/signing-links.ts";
+import { readEmbedEvidence } from "./embedding.ts";
+import { issueSigningLink } from "./services/signing-links.ts";
 import { signingProviderById } from "./services/signing-providers.ts";
 import {
   buildEnvelopeCertificateKey,
@@ -97,10 +104,13 @@ import {
   nextSignerLinkExpiresAt,
 } from "./envelope-deadline.ts";
 import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
+import { consumeRateLimit, refundRateLimit } from "./security/rate-limit.ts";
 import {
-  buildElectronicRecordsDisclosure,
+  buildDisclosureSections,
   CONSENT_STATEMENT,
-  ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+  disclosureSectionsAsText,
+  getDisclosureVersion,
+  normalizeCustomDisclosure,
 } from "./electronic-records-disclosure.ts";
 import {
   checkAccessCode,
@@ -115,6 +125,11 @@ import {
   type SignerCheckMethod,
   type SignerCheckState,
 } from "./signer-checks.ts";
+import {
+  isEarlierStep,
+  routeAfterSignatures,
+  signingStepOf,
+} from "./signing-steps.ts";
 
 export type SigningRequestMeta = {
   ipAddress?: string | null;
@@ -166,7 +181,9 @@ type SigningSignerRow = {
   lastNotifiedAt: number | null;
   lastNudgedAt: number | null;
   name: string;
+  role: "approver" | "signer";
   signOrder: number;
+  signingStep: number | null;
   signatureMeaning:
     "approval" | "authorship" | "responsibility" | "review" | null;
   signedAt: number | null;
@@ -271,6 +288,7 @@ const signingUnavailableStatusCodeMap: Record<
   number
 > = {
   "already-signed": 409,
+  completed: 409,
   declined: 409,
   expired: 410,
   voided: 409,
@@ -291,12 +309,19 @@ export class SigningAccessError extends Error {
   }
 }
 
+/** An approver reviews and approves or rejects; they sign nothing. */
+function isApprover(signer: { role?: string | null }): boolean {
+  return signer.role === "approver";
+}
+
 function getSigningUnavailableMessage(
   state: SigningUnavailableResponse["state"],
 ): string {
   switch (state) {
     case "already-signed":
       return "You've already signed.";
+    case "completed":
+      return "This envelope has been completed.";
     case "declined":
       return "This envelope has been declined.";
     case "voided":
@@ -319,6 +344,14 @@ function getSigningConsentUrl(token: string): string {
   return `/api/signing/${encodeURIComponent(token)}/consent`;
 }
 
+function getSigningApproveUrl(token: string): string {
+  return `/api/signing/${encodeURIComponent(token)}/approve`;
+}
+
+function getSigningFieldFitUrl(token: string): string {
+  return `/api/signing/${encodeURIComponent(token)}/fit`;
+}
+
 function getSigningDeclineUrl(token: string): string {
   return `/api/signing/${encodeURIComponent(token)}/decline`;
 }
@@ -326,10 +359,15 @@ function getSigningDeclineUrl(token: string): string {
 function getSigningDoneRedirectPath(
   token: string,
   envelopeTitle: string,
+  approved = false,
 ): string {
   const searchParams = new URLSearchParams();
 
   searchParams.set("title", envelopeTitle);
+
+  if (approved) {
+    searchParams.set("approved", "1");
+  }
 
   return `/sign/${encodeURIComponent(token)}/done?${searchParams.toString()}`;
 }
@@ -393,20 +431,23 @@ function buildDeclineNotificationEmail(input: {
   declineReason?: string;
   envelopeId: string;
   envelopeTitle: string;
+  /** An approver rejected it, rather than a signer declining. */
+  rejected?: boolean;
   senderEmail: string;
   senderName: string;
   signerEmail: string;
   signerName: string;
 }) {
   const envelopeUrl = getEnvelopeUrl(input.envelopeId);
-  const subject = `"${input.envelopeTitle}" was declined by ${input.signerName}`;
+  const verb = input.rejected ? "rejected" : "declined";
+  const subject = `"${input.envelopeTitle}" was ${verb} by ${input.signerName}`;
   const reasonLine = input.declineReason?.trim()
     ? `Reason provided: ${input.declineReason.trim()}`
     : null;
   const textBody = [
     `Hi ${input.senderName},`,
     "",
-    `${input.signerName} (${input.signerEmail}) declined "${input.envelopeTitle}" in ${input.branding.productName}.`,
+    `${input.signerName} (${input.signerEmail}) ${verb} "${input.envelopeTitle}" in ${input.branding.productName}.`,
     ...(reasonLine ? ["", reasonLine] : []),
     "",
     "Review the envelope:",
@@ -414,7 +455,7 @@ function buildDeclineNotificationEmail(input: {
   ].join("\n");
   const htmlBody = [
     `<p>Hi ${escapeHtml(input.senderName)},</p>`,
-    `<p>${escapeHtml(input.signerName)} (${escapeHtml(input.signerEmail)}) declined &ldquo;${escapeHtml(input.envelopeTitle)}&rdquo; in ${escapeHtml(input.branding.productName)}.</p>`,
+    `<p>${escapeHtml(input.signerName)} (${escapeHtml(input.signerEmail)}) ${verb} &ldquo;${escapeHtml(input.envelopeTitle)}&rdquo; in ${escapeHtml(input.branding.productName)}.</p>`,
     reasonLine
       ? `<p><strong>Reason provided:</strong> ${escapeHtml(input.declineReason!.trim())}</p>`
       : "",
@@ -584,7 +625,9 @@ async function listSignerRows(
         envelope_id AS "envelopeId",
         name,
         email,
+        role,
         sign_order AS "signOrder",
+        signing_step AS "signingStep",
         status,
         signing_token_hash AS "signingTokenHash",
         signing_token_expires_at AS "signingTokenExpiresAt",
@@ -600,8 +643,9 @@ async function listSignerRows(
         updated_at AS "updatedAt"
       FROM signers
       WHERE envelope_id = $1
-        -- Copy recipients are not part of the signing order.
-        AND role = 'signer'
+        -- Copy recipients are not part of the signing order. Approvers
+        -- are, and move it on exactly as signers do.
+        AND role IN ('signer', 'approver')
       ORDER BY sign_order ASC, id ASC
     `,
     [envelopeId],
@@ -639,6 +683,7 @@ async function getSignerRowBySigningTokenHash(
         name,
         email,
         sign_order AS "signOrder",
+        signing_step AS "signingStep",
         status,
         signing_token_hash AS "signingTokenHash",
         signing_token_expires_at AS "signingTokenExpiresAt",
@@ -773,6 +818,9 @@ async function lockSentEnvelope(
  * before any of their rows are written. The token is read once when the
  * page is opened; a correction can replace the hash in the meantime and
  * leave status as notified, which the later UPDATE used to treat as enough.
+ * The link must also not have expired since: removing an embedding site
+ * expires its links, and a submission already under way must not finish
+ * on one.
  */
 async function lockSignerForPresentedToken(
   tx: DbExecutor,
@@ -786,10 +834,10 @@ async function lockSignerForPresentedToken(
     tokenHash: string;
   },
 ): Promise<void> {
-  const locked = await queryOne<{ id: string }>(
+  const locked = await queryOne<{ expiresAt: number | null }>(
     tx,
     `
-      SELECT id
+      SELECT signing_token_expires_at AS "expiresAt"
       FROM signers
       WHERE id = $1
         AND envelope_id = $2
@@ -800,7 +848,15 @@ async function lockSignerForPresentedToken(
     [signerId, envelopeId, tokenHash],
   );
 
-  if (!locked) {
+  // The expiry is checked once the lock is held, on the row as it is then
+  // and against the time then. A time taken before the query would be as
+  // old as the wait for the lock, and could let through a link that
+  // expired during it, such as one whose site was removed meanwhile.
+  if (
+    !locked ||
+    (locked.expiresAt !== null &&
+      locked.expiresAt < Math.floor(Date.now() / 1000))
+  ) {
     throw new SigningMutationError(
       "This signing link is no longer active.",
       409,
@@ -814,6 +870,13 @@ async function recordViewedEventOnce(
   database: DbPool,
 ): Promise<void> {
   await withTransaction(async (tx) => {
+    // Two first openings at once must not both pass the check below and
+    // record two first views (and send two signer.viewed webhooks). This
+    // lock is taken only here, before any other, so it cannot deadlock.
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      `signudoc:first-view:${context.signer.id ?? ""}`,
+    ]);
+
     const existing = await queryOne<{ id: string }>(
       tx,
       `
@@ -992,6 +1055,7 @@ type Part11SignatureRecord = {
 
 function buildSignedAuditEvent(input: {
   authMethods: readonly SignerCheckMethod[];
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   part11?: Part11SignatureRecord | null;
   providerSignature?: ProviderSignatureEvidence | null;
@@ -1001,12 +1065,16 @@ function buildSignedAuditEvent(input: {
   submittedAt: number;
   timezoneOffsetMinutes: number;
 }): AuditEventRecord {
+  // An approver's decision is its own event, never "signed": the audit
+  // trail and the certificate must not show an approval as a signature.
+  const approval = isApprover(input.signer);
+
   return {
     actorEmail: input.signer.email,
     actorType: "signer",
     createdAt: input.submittedAt,
     envelopeId: input.envelopeId,
-    event: "signed",
+    event: approval ? "approved" : "signed",
     id: randomUUID(),
     ipAddress: input.requestMeta.ipAddress ?? null,
     metadata: {
@@ -1014,9 +1082,12 @@ function buildSignedAuditEvent(input: {
       signerId: input.signer.id,
       signerName: input.signer.name,
       signerOrder: input.signer.signOrder,
+      signingStep: signingStepOf(input.signer),
+      ...(approval ? { role: "approver" } : {}),
       authMethods: [...input.authMethods],
       signatureMethods: [...input.signatureMethods],
       timezoneOffsetMinutes: input.timezoneOffsetMinutes,
+      ...(input.embedded ? { embedded: input.embedded } : {}),
       ...(input.part11 ? { part11: input.part11 } : {}),
       ...(input.providerSignature
         ? { providerSignature: input.providerSignature }
@@ -1027,7 +1098,10 @@ function buildSignedAuditEvent(input: {
 }
 
 function buildDeclinedAuditEvent(input: {
+  /** The checks the person passed before declining or rejecting. */
+  authMethods: readonly string[];
   declinedAt: number;
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   reason?: string;
   requestMeta: SigningRequestMeta;
@@ -1038,7 +1112,8 @@ function buildDeclinedAuditEvent(input: {
     actorType: "signer",
     createdAt: input.declinedAt,
     envelopeId: input.envelopeId,
-    event: "declined",
+    // An approver rejects; the envelope ends the same way as a decline.
+    event: isApprover(input.signer) ? "rejected" : "declined",
     id: randomUUID(),
     ipAddress: input.requestMeta.ipAddress ?? null,
     metadata: {
@@ -1047,6 +1122,10 @@ function buildDeclinedAuditEvent(input: {
       signerId: input.signer.id,
       signerName: input.signer.name,
       signerOrder: input.signer.signOrder,
+      signingStep: signingStepOf(input.signer),
+      ...(input.embedded ? { embedded: input.embedded } : {}),
+      ...(isApprover(input.signer) ? { role: "approver" } : {}),
+      authMethods: [...input.authMethods],
     },
     userAgent: input.requestMeta.userAgent ?? null,
   };
@@ -1265,6 +1344,10 @@ async function sendCompletionEmails(input: {
   }
 }
 
+/** Wrong access codes a signer may give for one code in a week. */
+export const ACCESS_CODE_MAX_FAILURES = 10;
+const ACCESS_CODE_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class SigningMutationError extends Error {
   readonly statusCode: number;
 
@@ -1321,6 +1404,34 @@ function signerAuditMetadata(context: ResolvedSigningContext) {
   };
 }
 
+export type SignerEmailCodeResult = {
+  emailCodeSentAt: number;
+  maskedEmail: string;
+  /** Seconds until a new code can be sent; 0 when this call sent one. */
+  retryAfterSeconds: number;
+  /**
+   * Whether this call emailed a new code. False during the resend cooldown,
+   * when the code sent a moment ago is still the one to use.
+   */
+  sent: boolean;
+};
+
+function cooldownResult(
+  emailCodeSentAt: number,
+  now: number,
+  maskedEmail: string,
+): SignerEmailCodeResult {
+  return {
+    emailCodeSentAt,
+    maskedEmail,
+    retryAfterSeconds: Math.max(
+      1,
+      emailCodeSentAt + EMAIL_CODE_RESEND_SECONDS - now,
+    ),
+    sent: false,
+  };
+}
+
 /** Emails the signer a one-time code, when the sender asked for one. */
 export async function sendSignerEmailCode(
   token: string,
@@ -1328,7 +1439,7 @@ export async function sendSignerEmailCode(
     database = getDb(),
     emailService = createEmailService(),
   }: { database?: DbPool; emailService?: EmailService } = {},
-): Promise<{ emailCodeSentAt: number; maskedEmail: string }> {
+): Promise<SignerEmailCodeResult> {
   const context = await resolveSigningContext(token, { database });
   const state = await getSignerCheckState(context.signer.id!, database);
   const now = Math.floor(Date.now() / 1000);
@@ -1342,10 +1453,11 @@ export async function sendSignerEmailCode(
     now - state.emailCodeSentAt < EMAIL_CODE_RESEND_SECONDS &&
     state.emailCodeHash
   ) {
-    return {
-      emailCodeSentAt: state.emailCodeSentAt,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    return cooldownResult(
+      state.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const issued = issueEmailCode();
@@ -1397,12 +1509,22 @@ export async function sendSignerEmailCode(
       );
     }
 
+    // Another request claimed the window first. Its code is the one to use,
+    // unless that send failed and cleared it again in the meantime.
     const current = await getSignerCheckState(context.signer.id!, database);
 
-    return {
-      emailCodeSentAt: current.emailCodeSentAt ?? now,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    if (current.emailCodeHash === null || current.emailCodeSentAt === null) {
+      throw new SigningMutationError(
+        "The code could not be sent right now. Try again.",
+        503,
+      );
+    }
+
+    return cooldownResult(
+      current.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const minutes = Math.round(EMAIL_CODE_TTL_SECONDS / 60);
@@ -1463,6 +1585,8 @@ export async function sendSignerEmailCode(
   return {
     emailCodeSentAt: now,
     maskedEmail: maskEmailAddress(context.signer.email),
+    retryAfterSeconds: 0,
+    sent: true,
   };
 }
 
@@ -1513,6 +1637,7 @@ export async function verifySignerCheck(
         email: parsed.email,
         ipAddress: requestMeta.ipAddress ?? null,
         password: parsed.password,
+        signerName: context.signer.name,
         userAgent: requestMeta.userAgent ?? null,
         userId: state.accountUserId!,
       },
@@ -1542,7 +1667,34 @@ export async function verifySignerCheck(
       throw new SigningMutationError(describeCredentialFailure(result), 400);
     }
   } else if (parsed.method === "access_code") {
+    // An access code can be short, so wrong ones are counted per signer and
+    // code, over every link and address: a guesser gets a few tries a week,
+    // not a few every quarter of an hour. A new code from the sender starts
+    // a new count. Each try is counted before the code is compared, so tries
+    // sent at the same moment cannot all pass the check; a right one is
+    // then taken back off the count.
+    const failuresKey = `signing-access-code-failures:${context.signer.id!}:${state.accessCodeHash!}`;
+    const attempt = await consumeRateLimit(
+      {
+        key: failuresKey,
+        limit: ACCESS_CODE_MAX_FAILURES,
+        windowMs: ACCESS_CODE_FAILURE_WINDOW_MS,
+      },
+      { database },
+    );
+
+    if (!attempt.allowed) {
+      throw new SigningMutationError(
+        "Too many wrong access codes. Ask the sender for the code, or for a new one.",
+        429,
+      );
+    }
+
     passed = checkAccessCode(parsed.code, state.accessCodeHash!);
+
+    if (passed) {
+      await refundRateLimit(failuresKey, attempt, { database });
+    }
   } else {
     // Count the attempt and read the code in one statement, so parallel
     // guesses cannot share an attempt.
@@ -1616,6 +1768,86 @@ export async function verifySignerCheck(
 }
 
 /** Records that the signer agreed to use electronic records and signatures. */
+/**
+ * Whether what the signer has typed so far fits the field's box on the
+ * finished document, checked as they type, so they learn before they finish.
+ * The same check signing makes, with the same fonts.
+ */
+export async function checkSigningFieldFit(
+  token: string,
+  input: unknown,
+  {
+    database = getDb(),
+    verifiedMethods = [],
+  }: Pick<SubmitSigningOptions, "database" | "verifiedMethods"> = {},
+): Promise<{ fits: true } | { fits: false; maxCharacters: number }> {
+  const parsed = signingFieldFitRequestSchema.parse(input);
+  const context = await resolveSigningContext(token, { database });
+
+  await assertSignerChecksPassed(context, verifiedMethods, database);
+
+  const field = context.fields.find(
+    (entry) =>
+      entry.id === parsed.fieldId &&
+      entry.signerId === context.signer.id &&
+      (entry.type === "text" ||
+        entry.type === "number" ||
+        entry.type === "dropdown"),
+  );
+
+  if (!field) {
+    throw new SigningMutationError("That field is not yours to fill in.", 404);
+  }
+
+  const tooLong = await findTypedValueTooLongForField(
+    [{ field, value: parsed.value }],
+    context.pages,
+  );
+
+  return tooLong
+    ? { fits: false, maxCharacters: tooLong.maxCharacters }
+    : { fits: true };
+}
+
+/**
+ * The disclosure this signer reads, filled in for their sender. It is read
+ * from the database, not the settings cache, so the signing page and the
+ * consent check always agree on the words just after an administrator
+ * changes them.
+ */
+async function readSignerDisclosure(
+  context: SigningContext,
+  database: DbExecutor,
+) {
+  // Read fresh, not from the short settings cache, so the words and the
+  // support address in them are the ones saved right now.
+  const settings = resolveSettings(await readStoredSettings(database));
+  const customDisclosure = normalizeCustomDisclosure(
+    settings.consentDisclosure,
+  );
+
+  const sections = buildDisclosureSections(
+    {
+      contactAddress: settings.supportAddress ?? context.sender.email,
+      senderName: normalizeSenderName(context.sender),
+    },
+    customDisclosure,
+  );
+
+  return {
+    customDisclosure,
+    sections,
+    // A custom disclosure is named by the words as this signer reads them,
+    // filled in, so a change to the support address or the sender's name
+    // after the page loaded is refused too, and the record holds the words
+    // that were shown.
+    version:
+      customDisclosure === null
+        ? getDisclosureVersion(null)
+        : getDisclosureVersion(disclosureSectionsAsText(sections)),
+  };
+}
+
 export async function recordSignerConsent(
   token: string,
   input: unknown,
@@ -1633,7 +1865,10 @@ export async function recordSignerConsent(
     database,
   );
 
-  if (parsed.disclosureVersion !== ELECTRONIC_RECORDS_DISCLOSURE_VERSION) {
+  const disclosure = await readSignerDisclosure(context, database);
+  const disclosureVersion = disclosure.version;
+
+  if (parsed.disclosureVersion !== disclosureVersion) {
     throw new SigningMutationError(
       "The disclosure has changed. Reload the page to read the current one.",
       409,
@@ -1696,7 +1931,16 @@ export async function recordSignerConsent(
         ipAddress: requestMeta.ipAddress ?? null,
         metadata: {
           ...signerAuditMetadata(context),
-          disclosureVersion: ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+          disclosureVersion,
+          // The built-in words are known from their version. A custom
+          // disclosure can be changed or taken away later, so the words the
+          // signer saw, filled in as they read them, are kept with the
+          // record.
+          ...(disclosure.customDisclosure === null
+            ? {}
+            : {
+                disclosureText: disclosureSectionsAsText(disclosure.sections),
+              }),
           statement: CONSENT_STATEMENT,
         },
         userAgent: requestMeta.userAgent ?? null,
@@ -1706,6 +1950,47 @@ export async function recordSignerConsent(
   }, database);
 
   return { consentedAt };
+}
+
+/**
+ * What a link that signing, declining or voiding took away should say. It
+ * opens nothing: it only tells the signer what became of the envelope, so
+ * they are not sent to ask for a new link the sender cannot send. Any other
+ * link that opens nothing has expired.
+ */
+async function getSpentSigningLinkState(
+  tokenHash: string,
+  database: DbExecutor,
+): Promise<SigningUnavailableResponse["state"]> {
+  const spent = await queryOne<{
+    envelopeStatus: SigningEnvelopeRow["status"];
+    signerStatus: SigningSignerRow["status"];
+  }>(
+    database,
+    `
+      SELECT
+        envelopes.status AS "envelopeStatus",
+        signers.status AS "signerStatus"
+      FROM signers
+      JOIN envelopes ON envelopes.id = signers.envelope_id
+      WHERE signers.spent_signing_token_hash = $1
+      LIMIT 1
+    `,
+    [tokenHash],
+  );
+
+  switch (spent?.envelopeStatus) {
+    case "completed":
+      return "completed";
+    case "declined":
+      return "declined";
+    case "voided":
+      return "voided";
+    case "sent":
+      return spent.signerStatus === "signed" ? "already-signed" : "expired";
+    default:
+      return "expired";
+  }
 }
 
 async function resolveSigningContext(
@@ -1722,7 +2007,9 @@ async function resolveSigningContext(
   );
 
   if (!signerRow) {
-    throw new SigningAccessError("expired");
+    throw new SigningAccessError(
+      await getSpentSigningLinkState(hashOpaqueToken(token), database),
+    );
   }
 
   const envelopeRow = await getEnvelopeRow(signerRow.envelopeId, database);
@@ -1749,7 +2036,10 @@ async function resolveSigningContext(
   }
 
   if (signer.status === "signed") {
-    throw new SigningAccessError("already-signed");
+    throw new SigningAccessError(
+      "already-signed",
+      isApprover(signer) ? "You've already approved this document." : undefined,
+    );
   }
 
   if (typeof signer.signOrder !== "number") {
@@ -1806,17 +2096,16 @@ export async function getSigningPayloadForToken(
     database,
   );
   const storageService = createStorageService();
-  const branding = await getBranding();
+  const disclosure = await readSignerDisclosure(context, database);
 
   await recordViewedEventOnce(context, requestMeta, database);
 
   const signerNamesById = new Map(
     context.signers.map((signer) => [signer.id, signer.name] as const),
   );
-  const signerOrdersById = new Map(
-    context.signers.map((signer) => [signer.id, signer.signOrder] as const),
+  const signersById = new Map(
+    context.signers.map((signer) => [signer.id, signer] as const),
   );
-  const currentSignerOrder = context.signer.signOrder ?? 0;
 
   const currentSignerFields = context.fields
     .filter((field) => field.signerId === context.signer.id)
@@ -1839,11 +2128,14 @@ export async function getSigningPayloadForToken(
   const visibleFields = await Promise.all(
     context.fields
       .filter((field) => {
-        const signerOrder = signerOrdersById.get(field.signerId);
+        const fieldSigner = signersById.get(field.signerId);
 
+        // What the signers of earlier steps entered. Someone signing at the
+        // same time may have signed already, but what they entered is not
+        // shown: it was not on the page when this signer's turn began.
         return (
-          typeof signerOrder === "number" &&
-          signerOrder < currentSignerOrder &&
+          fieldSigner !== undefined &&
+          isEarlierStep(fieldSigner, context.signer) &&
           typeof field.submittedAt === "number"
         );
       })
@@ -1871,15 +2163,13 @@ export async function getSigningPayloadForToken(
 
   return signingPayloadSchema.parse({
     consentUrl: getSigningConsentUrl(token),
+    fieldFitUrl: getSigningFieldFitUrl(token),
     consentedAt: checkState.consentedAt,
     currentSignerFields,
     disclosure: {
-      sections: buildElectronicRecordsDisclosure({
-        contactAddress: branding.supportAddress ?? context.sender.email,
-        senderName: normalizeSenderName(context.sender),
-      }),
+      sections: disclosure.sections,
       statement: CONSENT_STATEMENT,
-      version: ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+      version: disclosure.version,
     },
     declineUrl: getSigningDeclineUrl(token),
     documentUrl: getSigningDocumentUrl(token),
@@ -1915,7 +2205,11 @@ export async function getSigningPayloadForToken(
       id: context.signer.id,
       name: context.signer.name,
       order: context.signer.signOrder,
+      role: isApprover(context.signer) ? "approver" : "signer",
     },
+    ...(isApprover(context.signer)
+      ? { approveUrl: getSigningApproveUrl(token) }
+      : {}),
     state: "ready",
     submitUrl: getSigningSubmitUrl(token),
     visibleFields,
@@ -1969,6 +2263,7 @@ async function reauthenticatePart11Signer(
       email: reauthentication.email,
       ipAddress: requestMeta.ipAddress ?? null,
       password: reauthentication.password,
+      signerName: context.signer.name,
       userAgent: requestMeta.userAgent ?? null,
       userId: state.accountUserId,
     },
@@ -2105,6 +2400,34 @@ async function assertStillSignersTurn(
 type SigningContext = Awaited<ReturnType<typeof resolveSigningContext>>;
 
 /**
+ * Refuses an answer too long to be read in its box on the finished document,
+ * before anything is saved, so the signer can shorten it. Without this the
+ * value would be drawn so small that no one could read it. A dropdown choice
+ * is the sender's text, which the signer cannot shorten, so it is taken and
+ * drawn whole however small.
+ */
+async function assertTypedValuesFitTheirFields(
+  context: SigningContext,
+  fieldUpdates: ReadonlyMap<string, FieldPersistenceUpdate>,
+) {
+  const entries = context.fields.flatMap((field) => {
+    const value = field.id ? fieldUpdates.get(field.id)?.value : null;
+
+    return (field.type === "text" || field.type === "number") && value
+      ? [{ field, value }]
+      : [];
+  });
+  const tooLong = await findTypedValueTooLongForField(entries, context.pages);
+
+  if (tooLong) {
+    throw new SigningMutationError(
+      `An answer on page ${tooLong.page} is too long to fit in its box on the document. Shorten it to ${tooLong.maxCharacters} characters or fewer, or ask the sender for a bigger box.`,
+      400,
+    );
+  }
+}
+
+/**
  * What the signer's submission changes: each of their fields' new value,
  * checked against what the field accepts, and the drawn signatures to store.
  */
@@ -2128,6 +2451,28 @@ function buildSignerSubmission(
     ): field is ReturnType<typeof fieldRecordSchema.parse> & { id: string } =>
       field.signerId === currentSignerId && typeof field.id === "string",
   );
+
+  // An approver has no fields: saving fields and sending both refuse one
+  // that does, and so does the database. Should one turn up all the same,
+  // nothing is approved, rather than leaving their fields empty.
+  if (isApprover(context.signer)) {
+    if (currentSignerFields.length > 0) {
+      throw new SigningMutationError(
+        "This document has fields for an approver. Ask the sender to send it again.",
+        409,
+      );
+    }
+
+    return {
+      currentSignerFields,
+      currentSignerId,
+      drawnSignatureUploads: [] as Array<{
+        body: Uint8Array;
+        imageKey: string;
+      }>,
+      fieldUpdates: new Map<string, FieldPersistenceUpdate>(),
+    };
+  }
 
   if (currentSignerFields.length === 0) {
     throw new SigningMutationError(
@@ -2316,7 +2661,75 @@ function buildSignerSubmission(
   };
 }
 
+/**
+ * Raised inside a signature's or a decline's transaction when the rows it
+ * holds locked show that the signing order moved on after the submission
+ * was prepared: another signer of the same step signed at the same moment.
+ * The transaction rolls back and the whole submission starts again from
+ * what the database now says.
+ */
+class SigningRouteChangedError extends Error {
+  constructor() {
+    super("Another signer of this step signed at the same moment.");
+    this.name = "SigningRouteChangedError";
+  }
+}
+
+/**
+ * Enough for every signer of a step submitting at the same moment: each
+ * attempt that loses waits for one that wins, and there are no more than
+ * MAX_SIGNERS_CEILING signers.
+ */
+const MAX_ROUTE_ATTEMPTS = 5;
+
+async function retryWhileRouteChanges<T>(attempt: () => Promise<T>) {
+  for (let tries = 1; ; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof SigningRouteChangedError)) {
+        throw error;
+      }
+
+      if (tries >= MAX_ROUTE_ATTEMPTS) {
+        throw new SigningMutationError(
+          "Other signers were signing at the same moment. Try again.",
+          409,
+        );
+      }
+    }
+  }
+}
+
 export async function submitSigningForToken(
+  token: string,
+  input: unknown,
+  options: SubmitSigningOptions = {},
+): Promise<SigningSubmitResponse> {
+  return retryWhileRouteChanges(() =>
+    submitSigningOnce(token, input, options, { approval: false }),
+  );
+}
+
+/**
+ * An approver approves. Everything a signature goes through applies, from
+ * the checks and the consent to the locking and the restart when the route
+ * changed underneath it, so of a signer and an approver of one step who
+ * finish at the same moment exactly one moves the order on, as with two
+ * signers. Only what is recorded differs: no fields, and an "approved"
+ * event instead of "signed".
+ */
+export async function approveSigningForToken(
+  token: string,
+  input: unknown,
+  options: Omit<SubmitSigningOptions, "providerSignature"> = {},
+): Promise<SigningSubmitResponse> {
+  return retryWhileRouteChanges(() =>
+    submitSigningOnce(token, input, options, { approval: true }),
+  );
+}
+
+async function submitSigningOnce(
   token: string,
   input: unknown,
   {
@@ -2328,13 +2741,53 @@ export async function submitSigningForToken(
     verifiedMethods = [],
     verifyPassword,
   }: SubmitSigningOptions = {},
+  { approval }: { approval: boolean },
 ): Promise<SigningSubmitResponse> {
-  const parsedInput = signingSubmissionSchema.parse(input);
+  const parsedInput: SigningSubmission = approval
+    ? {
+        ...approvalSubmissionSchema.parse(input),
+        fields: [],
+      }
+    : signingSubmissionSchema.parse(input);
   const context = await resolveSigningContext(token, { database });
+  // Signed inside another app: no email to the next signer, and the
+  // evidence says where.
+  const embedded = context.signer.id
+    ? await readEmbedEvidence(context.envelope.id, context.signer.id, database)
+    : null;
+  const doneRedirectPath = embedded?.origin
+    ? `/embed/sign/${encodeURIComponent(token)}/done?${new URLSearchParams({ origin: embedded.origin, title: context.envelope.title, ...(approval ? { approved: "1" } : {}) }).toString()}`
+    : getSigningDoneRedirectPath(token, context.envelope.title, approval);
+
+  if (approval !== isApprover(context.signer)) {
+    throw new SigningMutationError(
+      approval
+        ? "This link is for signing, not approving."
+        : "This link is for approving. Approve or reject the document from the page.",
+      409,
+    );
+  }
+
+  // Approvers are refused at sending on Part 11 envelopes and on envelopes
+  // signed through a signing provider (envelopes.ts). Checked again here so
+  // an approval can never stand where one of those signatures belongs.
+  if (
+    approval &&
+    (context.envelope.part11 ||
+      (context.envelope.signatureLevel ?? "simple") !== "simple" ||
+      providerSignature)
+  ) {
+    throw new SigningMutationError(
+      "This document cannot be approved here. Ask the sender to send it again.",
+      409,
+    );
+  }
 
   // A document sent for advanced or qualified signatures is signed by each
   // signer's provider, never by a plain submit, and the other way round.
-  if ((context.envelope.signatureLevel ?? "simple") === "simple") {
+  if (approval) {
+    // Nothing to check: no provider is involved in an approval.
+  } else if ((context.envelope.signatureLevel ?? "simple") === "simple") {
     if (providerSignature) {
       throw new SigningMutationError(
         "This document is not signed through a signing provider.",
@@ -2361,7 +2814,7 @@ export async function submitSigningForToken(
     );
   }
 
-  const emailService = givenEmailService ?? createEmailService();
+  const emailService = givenEmailService ?? createLazyEmailService();
   const part11Signature = await reauthenticatePart11Signer(
     context,
     signerChecks.state,
@@ -2382,42 +2835,33 @@ export async function submitSigningForToken(
     drawnSignatureUploads,
     fieldUpdates,
   } = buildSignerSubmission(context, parsedInput, submittedAt);
+
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
   const presentedTokenHash = hashOpaqueToken(token);
 
   let signingStatePersisted = false;
 
   try {
-    const currentSignerIndex = context.signers.findIndex(
-      (signer) => signer.id === context.signer.id,
+    // Whether this is the last signature, as far as can be told before the
+    // envelope is locked. Everyone else has signed: this submission makes
+    // the final files. Anyone else still to sign, in this step or a later
+    // one: it records the signature and moves the order on if this step is
+    // done. Signers of the same step can submit at the same moment, so the
+    // second of them may find, once it holds the envelope, that the first
+    // has signed meanwhile and it is the last after all. It then starts
+    // again (SigningRouteChangedError), and is the last signature this time.
+    const isLastSignature = context.signers.every(
+      (signer) => signer.id === currentSignerId || signer.status === "signed",
     );
-    const nextSigner =
-      currentSignerIndex >= 0
-        ? context.signers[currentSignerIndex + 1]
-        : undefined;
-    let nextSignerLink: IssuedSigningLink | undefined;
-    let nextSignerDelivery:
-      { email: string; id: string; name: string } | undefined;
-    const nextSignerId = nextSigner?.id;
-
-    if (nextSigner) {
-      if (nextSigner.status !== "pending") {
-        throw new SigningMutationError(
-          "Envelope routing is out of sync for the next signer.",
-          409,
-        );
-      }
-
-      if (!nextSignerId) {
-        throw new SigningMutationError(
-          "Envelope routing is out of sync for the next signer.",
-          500,
-        );
-      }
-
-      // Only the link itself. When it ends is settled further down, from
-      // the deadline as it stands once the envelope is locked.
-      nextSignerLink = await issueSigningLink({ issuedAt: routedAt });
-    }
+    // Each signer of the next step gets a link of their own. When it ends
+    // is settled once the envelope is locked, from the deadline then.
+    let nextSignerDeliveries: {
+      email: string;
+      id: string;
+      name: string;
+      role: "approver" | "signer";
+      url: string;
+    }[] = [];
 
     for (const upload of drawnSignatureUploads) {
       await storageService.putObject({
@@ -2429,6 +2873,7 @@ export async function submitSigningForToken(
 
     const signedAuditEvent = buildSignedAuditEvent({
       authMethods: signerChecks.passed,
+      embedded,
       envelopeId: context.envelope.id,
       part11: part11Signature,
       providerSignature: providerSignature?.evidence ?? null,
@@ -2455,14 +2900,7 @@ export async function submitSigningForToken(
       timezoneOffsetMinutes: parsedInput.clientTimezoneOffsetMinutes,
     });
 
-    if (nextSigner && nextSignerLink) {
-      if (!nextSignerId) {
-        throw new SigningMutationError(
-          "Envelope routing is out of sync for the next signer.",
-          500,
-        );
-      }
-
+    if (!isLastSignature) {
       // The deadline the next signer is given. The sender can move it while
       // this signer submits, and moving it only reaches the signer whose
       // turn it is then. So it is read here, where this update holds the
@@ -2548,6 +2986,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -2573,48 +3012,75 @@ export async function submitSigningForToken(
           );
         }
 
-        const activatedNextSigner = await queryOne<{
-          email: string;
-          name: string;
-        }>(
-          tx,
-          `
-            UPDATE signers
-            SET
-              status = 'notified',
-              signing_token_hash = $1,
-              signing_token_expires_at = $2,
-              turn_started_at = $3,
-              last_notified_at = $4,
-              updated_at = $5
-            WHERE id = $6
-              AND envelope_id = $7
-              AND status = 'pending'
-            RETURNING name, email
-          `,
-          [
-            nextSignerLink.tokenHash,
-            nextSignerLinkExpiresAt(lockedEnvelope.expiresAt, routedAt),
-            routedAt,
-            routedAt,
-            routedAt,
-            nextSignerId,
-            context.envelope.id,
-          ],
+        // Who is still to sign, read with this signature in place and while
+        // the envelope's row is held. Every other signature, decline and
+        // void takes that row first, so nothing here can change until this
+        // transaction ends, and of two signers of one step who submit at
+        // the same moment exactly one finds the step finished.
+        const route = routeAfterSignatures(
+          (await listSignerRows(context.envelope.id, tx)).map(mapSignerRow),
         );
 
-        if (!activatedNextSigner) {
-          throw new SigningMutationError(
-            "Unable to activate the next signer for this envelope.",
-            500,
-          );
+        if (route.waiting.length === 0 && route.next.length === 0) {
+          // Everyone else signed while this was being prepared: this is the
+          // last signature, and the envelope's final files have to be made.
+          throw new SigningRouteChangedError();
         }
 
-        nextSignerDelivery = {
-          email: activatedNextSigner.email,
-          id: nextSignerId,
-          name: activatedNextSigner.name,
-        };
+        const deliveries: typeof nextSignerDeliveries = [];
+
+        for (const nextSigner of route.next) {
+          // Each signer of the next step gets a link of their own.
+          const link = await issueSigningLink({ issuedAt: routedAt });
+          const activatedNextSigner = await queryOne<{
+            email: string;
+            name: string;
+            role: "approver" | "signer";
+          }>(
+            tx,
+            `
+              UPDATE signers
+              SET
+                status = 'notified',
+                signing_token_hash = $1,
+                signing_token_expires_at = $2,
+                turn_started_at = $3,
+                last_notified_at = $4,
+                updated_at = $5
+              WHERE id = $6
+                AND envelope_id = $7
+                AND role IN ('signer', 'approver')
+                AND status = 'pending'
+              RETURNING name, email, role
+            `,
+            [
+              link.tokenHash,
+              nextSignerLinkExpiresAt(lockedEnvelope.expiresAt, routedAt),
+              routedAt,
+              routedAt,
+              routedAt,
+              nextSigner.id,
+              context.envelope.id,
+            ],
+          );
+
+          if (!activatedNextSigner || !nextSigner.id) {
+            throw new SigningMutationError(
+              "Unable to activate the next signer for this envelope.",
+              500,
+            );
+          }
+
+          deliveries.push({
+            email: activatedNextSigner.email,
+            id: nextSigner.id,
+            name: activatedNextSigner.name,
+            role: activatedNextSigner.role,
+            url: link.url,
+          });
+        }
+
+        nextSignerDeliveries = deliveries;
 
         await recordAuditEvent(
           {
@@ -2634,46 +3100,47 @@ export async function submitSigningForToken(
       signingStatePersisted = true;
       await deleteReplacedRevision(replacedRevisionKey, storageService);
 
-      if (!nextSignerDelivery) {
-        throw new SigningMutationError(
-          "Unable to activate the next signer for this envelope.",
-          500,
-        );
-      }
+      // Nobody to invite while others in this step are still signing. In
+      // an embedded envelope nobody is emailed: the app starts the next
+      // step's turns, and the signer.signed webhook shows who is next.
+      const invitations = embedded ? [] : nextSignerDeliveries;
 
-      try {
-        const delivery = await emailService.send(
-          buildSigningInvitationEmail({
-            branding: await getBranding(),
-            envelopeTitle: context.envelope.title,
-            expiresAt: nextSignerDeadline,
-            senderName: normalizeSenderName(context.sender),
-            signerEmail: nextSignerDelivery.email,
-            signerName: nextSignerDelivery.name,
-            signingUrl: nextSignerLink.url,
-          }),
-        );
+      for (const nextSignerDelivery of invitations) {
+        try {
+          const delivery = await emailService.send(
+            buildSigningInvitationEmail({
+              branding: await getBranding(),
+              envelopeTitle: context.envelope.title,
+              expiresAt: nextSignerDeadline,
+              role: nextSignerDelivery.role,
+              senderName: normalizeSenderName(context.sender),
+              signerEmail: nextSignerDelivery.email,
+              signerName: nextSignerDelivery.name,
+              signingUrl: nextSignerDelivery.url,
+            }),
+          );
 
-        await recordEmailSent(
-          {
-            envelopeId: context.envelope.id,
-            messageId: delivery.messageId,
-            recipient: nextSignerDelivery.email,
-            signerId: nextSignerDelivery.id,
-            template: "signing_invitation",
-          },
-          database,
-        );
-      } catch (error) {
-        console.error(
-          `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSignerDelivery.email}:`,
-          error,
-        );
+          await recordEmailSent(
+            {
+              envelopeId: context.envelope.id,
+              messageId: delivery.messageId,
+              recipient: nextSignerDelivery.email,
+              signerId: nextSignerDelivery.id,
+              template: "signing_invitation",
+            },
+            database,
+          );
+        } catch (error) {
+          console.error(
+            `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSignerDelivery.email}:`,
+            error,
+          );
+        }
       }
 
       return signingSubmitResponseSchema.parse({
         envelopeId: context.envelope.id,
-        redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+        redirectPath: doneRedirectPath,
         submittedAt,
       });
     }
@@ -2703,10 +3170,6 @@ export async function submitSigningForToken(
       context.envelope.id,
       database,
     );
-    const auditEvents = [
-      ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-      signedAuditEvent,
-    ];
     const storageIdentity = {
       envelopeId: context.envelope.id,
       userId: context.envelope.userId,
@@ -2739,6 +3202,38 @@ export async function submitSigningForToken(
           signerId: currentSignerId,
           tokenHash: presentedTokenHash,
         });
+
+        // The final files are made from the signers, fields and audit trail
+        // read before the lock, which hold everyone else's signature: a
+        // signature cannot be taken back. Checked again here all the same,
+        // so the envelope is never finished while anyone is still to sign.
+        const stillToSign = await queryOne<{ id: string }>(
+          tx,
+          `
+            SELECT id FROM signers
+            WHERE envelope_id = $1
+              AND role IN ('signer', 'approver')
+              AND id <> $2
+              AND status <> 'signed'
+            LIMIT 1
+          `,
+          [context.envelope.id, currentSignerId],
+        );
+
+        if (stillToSign) {
+          throw new SigningRouteChangedError();
+        }
+
+        // The audit trail the certificate shows, read with the envelope and
+        // its audit chain held: an event recorded since the link was opened
+        // (a view, an email, a reminder) is on it, and one recorded from
+        // now on waits until the envelope is finished.
+        await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+        const auditEvents = [
+          ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+          signedAuditEvent,
+        ];
 
         // Made while the envelope is locked: the files have fixed keys, and
         // a second submission at the same time waits, then stops above.
@@ -2814,6 +3309,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -2939,7 +3435,7 @@ export async function submitSigningForToken(
 
     return signingSubmitResponseSchema.parse({
       envelopeId: context.envelope.id,
-      redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+      redirectPath: doneRedirectPath,
       submittedAt,
     });
   } catch (error) {
@@ -2987,7 +3483,10 @@ export async function prepareSignerSubmission(
   const parsedInput = signingSubmissionSchema.parse(input);
   const context = await resolveSigningContext(token, { database });
 
-  if ((context.envelope.signatureLevel ?? "simple") === "simple") {
+  if (
+    (context.envelope.signatureLevel ?? "simple") === "simple" ||
+    isApprover(context.signer)
+  ) {
     throw new SigningMutationError(
       "This document is not signed through a signing provider.",
       409,
@@ -3010,6 +3509,8 @@ export async function prepareSignerSubmission(
   const { currentSignerId, drawnSignatureUploads, fieldUpdates } =
     buildSignerSubmission(context, parsedInput, submittedAt);
 
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
+
   return {
     context,
     images: new Map(
@@ -3030,6 +3531,16 @@ export async function prepareSignerSubmission(
 export async function declineSigningForToken(
   token: string,
   input: unknown,
+  options: SubmitSigningOptions = {},
+): Promise<SigningDeclineResponse> {
+  return retryWhileRouteChanges(() =>
+    declineSigningOnce(token, input, options),
+  );
+}
+
+async function declineSigningOnce(
+  token: string,
+  input: unknown,
   {
     database = getDb(),
     requestMeta = {},
@@ -3039,8 +3550,12 @@ export async function declineSigningForToken(
   const parsedInput = declineEnvelopeSchema.parse(input);
   const context = await resolveSigningContext(token, { database });
 
-  await assertSignerChecksPassed(context, verifiedMethods, database);
-  const emailService = createEmailService();
+  const signerChecks = await assertSignerChecksPassed(
+    context,
+    verifiedMethods,
+    database,
+  );
+  const emailService = createLazyEmailService();
   const storageService = createStorageService();
   const currentSignerId = context.signer.id;
   const presentedTokenHash = hashOpaqueToken(token);
@@ -3065,8 +3580,17 @@ export async function declineSigningForToken(
     );
   }
 
+  // Declined inside another app: the certificate says where, not that an
+  // emailed link was used.
+  const embedded = await readEmbedEvidence(
+    context.envelope.id,
+    currentSignerId,
+    database,
+  );
   const declinedAuditEvent = buildDeclinedAuditEvent({
+    authMethods: signerChecks.passed,
     declinedAt,
+    embedded,
     envelopeId: context.envelope.id,
     reason: declineReason,
     requestMeta,
@@ -3096,10 +3620,6 @@ export async function declineSigningForToken(
     declinedAt,
     declineReason,
   );
-  const auditEvents = [
-    ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-    declinedAuditEvent,
-  ];
   const storedCertificateKeys: string[] = [];
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
@@ -3145,6 +3665,38 @@ export async function declineSigningForToken(
       );
     }
 
+    // The same for where everyone else stands. A signer of the same step
+    // who signed a moment ago would otherwise be shown on the certificates
+    // as still waiting, without their signature in the audit trail they
+    // show. Started again, the decline reads them as they are now.
+    const statusesNow = await tx.query<{ id: string; status: string }>(
+      `
+        SELECT id, status FROM signers
+        WHERE envelope_id = $1 AND role IN ('signer', 'approver') AND id <> $2
+      `,
+      [context.envelope.id, currentSignerId],
+    );
+
+    if (
+      statusesNow.rows.some(
+        (row) =>
+          context.signers.find((signer) => signer.id === row.id)?.status !==
+          row.status,
+      )
+    ) {
+      throw new SigningRouteChangedError();
+    }
+
+    // The audit trail the certificates show, read with the envelope and its
+    // audit chain held, so an event recorded since the link was opened is
+    // on them and none can be added before the decline is.
+    await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+    const auditEvents = [
+      ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+      declinedAuditEvent,
+    ];
+
     // Made while the envelope is locked: the certificates have fixed keys,
     // and a void, the last signature or a second decline at the same time
     // waits, then stops above without touching the files this one saved.
@@ -3187,6 +3739,7 @@ export async function declineSigningForToken(
         UPDATE signers
         SET
           status = 'declined',
+          spent_signing_token_hash = signing_token_hash,
           signing_token_hash = NULL,
           signing_token_expires_at = NULL,
           declined_at = $1,
@@ -3283,6 +3836,7 @@ export async function declineSigningForToken(
         declineReason,
         envelopeId: context.envelope.id,
         envelopeTitle: context.envelope.title,
+        rejected: isApprover(context.signer),
         senderEmail: context.sender.email,
         senderName: normalizeSenderName(context.sender),
         signerEmail: context.signer.email,

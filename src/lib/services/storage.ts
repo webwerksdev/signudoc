@@ -31,8 +31,11 @@ export function buildContentDisposition(
   // Header values must be Latin-1, and the quoted fallback is safest as plain
   // ASCII. Browsers that understand filename* (all current ones) use the
   // UTF-8 name instead.
-  const fallbackName = fileName.replace(/[^\x20-\x7e]+|["\\]+/g, "_");
-  const encodedName = encodeURIComponent(fileName).replace(
+  // toWellFormed() swaps a lone surrogate for U+FFFD, since
+  // encodeURIComponent throws on one.
+  const wellFormedName = fileName.toWellFormed();
+  const fallbackName = wellFormedName.replace(/[^\x20-\x7e]+|["\\]+/g, "_");
+  const encodedName = encodeURIComponent(wellFormedName).replace(
     /['()*]/g,
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   );

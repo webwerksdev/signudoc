@@ -17,9 +17,10 @@ import {
   type ReplaceSignersResponse,
 } from "@/lib/schemas/signer";
 import { SIGNATURE_MEANING_DETAILS } from "@/lib/signature-meanings";
+import { moveListedSigner, removeListedSigner } from "@/lib/signing-steps";
 import {
+  DEFAULT_MAX_SIGNERS_PER_ENVELOPE,
   MAX_COPY_RECIPIENTS_PER_ENVELOPE,
-  MAX_SIGNERS_PER_ENVELOPE,
   signatureMeanings,
   type SignatureMeaning,
 } from "@/lib/types/domain";
@@ -54,8 +55,15 @@ type ShellSigner = SignerChecks & {
   email: string;
   localId: string;
   name: string;
+  /** An approver approves or rejects, with no fields of their own. */
+  role: "approver" | "signer";
   signerId?: string;
   touched: Record<SignerField, boolean>;
+  /**
+   * Signs at the same time as the signer above, in the same step of the
+   * signing order. Ignored for the first signer, and in Part 11 mode.
+   */
+  withPrevious: boolean;
 };
 
 type SignerErrors = {
@@ -94,13 +102,41 @@ function createSigner(
     requireEmailCode: overrides?.requireEmailCode ?? false,
     wantsAccessCode: overrides?.hasAccessCode ?? false,
     name: overrides?.name ?? "",
+    role: overrides?.role ?? "signer",
     signatureMeaning: overrides?.signatureMeaning ?? null,
     signerId: overrides?.signerId,
     touched: {
       email: overrides?.touched?.email ?? false,
       name: overrides?.touched?.name ?? false,
     },
+    withPrevious: overrides?.withPrevious ?? false,
   };
+}
+
+/**
+ * Each signer's step of the signing order, from the list and its "at the
+ * same time as the signer above" choices. In Part 11 mode every signer has
+ * a step of their own.
+ */
+function computeSigningSteps(
+  signers: readonly Pick<ShellSigner, "withPrevious">[],
+  part11Mode: boolean,
+): number[] {
+  const steps: number[] = [];
+
+  for (const [index, signer] of signers.entries()) {
+    const previous = steps[index - 1];
+
+    steps.push(
+      previous === undefined
+        ? 1
+        : signer.withPrevious && !part11Mode
+          ? previous
+          : previous + 1,
+    );
+  }
+
+  return steps;
 }
 
 type SignerCheckChoice = "access_code" | "email_code" | "none";
@@ -137,21 +173,22 @@ function signerCheckChoice(
 }
 
 function buildInitialModel(record?: DraftSignerStepData): InitialModel {
-  const signers =
-    record?.signers
-      .slice()
-      .sort((left, right) => left.order - right.order)
-      .map((signer) =>
-        createSigner(signer.id, {
-          email: signer.email,
-          hasAccessCode: signer.hasAccessCode,
-          name: signer.name,
-          requireEmailCode: signer.requireEmailCode,
-          signatureMeaning: signer.signatureMeaning ?? null,
-          signerId: signer.id,
-          touched: { email: true, name: true },
-        }),
-      ) ?? [];
+  const sorted =
+    record?.signers.slice().sort((left, right) => left.order - right.order) ??
+    [];
+  const signers = sorted.map((signer, index) =>
+    createSigner(signer.id, {
+      email: signer.email,
+      hasAccessCode: signer.hasAccessCode,
+      name: signer.name,
+      requireEmailCode: signer.requireEmailCode,
+      role: signer.role,
+      signatureMeaning: signer.signatureMeaning ?? null,
+      signerId: signer.id,
+      touched: { email: true, name: true },
+      withPrevious: index > 0 && sorted[index - 1]?.step === signer.step,
+    }),
+  );
 
   return {
     copyRecipients: (record?.copyRecipients ?? []).map((recipient) => ({
@@ -265,27 +302,16 @@ function reorderSigners(
     (signer) => signer.localId === signerLocalId,
   );
 
-  if (signerIndex === -1) {
-    return signers;
-  }
-
-  const targetIndex =
-    direction === "earlier" ? signerIndex - 1 : signerIndex + 1;
-
-  if (targetIndex < 0 || targetIndex >= signers.length) {
-    return signers;
-  }
-
-  const nextSigners = [...signers];
-  const [movedSigner] = nextSigners.splice(signerIndex, 1);
-  nextSigners.splice(targetIndex, 0, movedSigner);
-  return nextSigners;
+  return moveListedSigner(signers, signerIndex, direction);
 }
 
 function buildSignerRequest(
   signers: readonly ShellSigner[],
   copyRecipients: readonly ShellCopyRecipient[],
+  part11Mode: boolean,
 ) {
+  const steps = computeSigningSteps(signers, part11Mode);
+
   return {
     copyRecipients: copyRecipients.map((recipient) => ({
       email: recipient.email,
@@ -304,8 +330,11 @@ function buildSignerRequest(
       id: signer.signerId,
       name: signer.name,
       requireEmailCode: signer.requireEmailCode,
+      // Part 11 mode has no approvers (envelopes.ts).
+      role: part11Mode ? "signer" : signer.role,
       signatureMeaning: signer.signatureMeaning,
       signOrder: index + 1,
+      signingStep: steps[index],
     })),
   };
 }
@@ -348,12 +377,28 @@ function SignerCard({
   onChecksChange,
   onMove,
   onRemove,
+  onRoleChange,
+  onTogetherChange,
   accessCodeError,
   part11Mode = false,
+  previousStepLabel,
+  showStep,
   signer,
+  step,
+  stepSize,
 }: {
   accessCodeError?: string;
   part11Mode?: boolean;
+  /** Who signs in the step before this signer's, as "Signer 2". */
+  previousStepLabel: string | null;
+  /** Some signers share a step, so every card says which step it is in. */
+  showStep: boolean;
+  /** This signer's step of the signing order. */
+  step: number;
+  /** How many signers are in that step. */
+  stepSize: number;
+  onTogetherChange: (together: boolean) => void;
+  onRoleChange: (role: ShellSigner["role"]) => void;
   onChecksChange: (patch: Partial<SignerChecks>) => void;
   canMoveEarlier: boolean;
   canMoveLater: boolean;
@@ -385,10 +430,21 @@ function SignerCard({
         };
   const palette = getSignerPalette(index);
   const order = index + 1;
-  const routeLabel =
-    order === 1
-      ? "Receives the invitation immediately after send."
-      : `Receives the document after Signer ${order - 1} finishes.`;
+  const together = index > 0 && signer.withPrevious && !part11Mode;
+  const previous = previousStepLabel ?? `Signer ${String(order - 1)}`;
+  const finishes = previous.includes(" and ") ? "finish" : "finishes";
+  let routeLabel: string;
+
+  if (step === 1) {
+    routeLabel =
+      stepSize > 1
+        ? "Receives the invitation immediately after send, and signs at the same time as the others in step 1."
+        : "Receives the invitation immediately after send.";
+  } else if (together) {
+    routeLabel = `Signs at the same time as Signer ${String(order - 1)}, once ${previous} ${finishes}.`;
+  } else {
+    routeLabel = `Receives the document after ${previous} ${finishes}.`;
+  }
 
   return (
     <li className="well p-4 sm:p-5">
@@ -408,10 +464,46 @@ function SignerCard({
                 style={{ backgroundColor: palette.color }}
               />
               Signer {order}
+              {signer.role === "approver" && !part11Mode ? " · Approver" : ""}
+              {showStep ? ` · Step ${String(step)}` : ""}
             </span>
             <p className="text-[0.8125rem] leading-5 text-(--secondary)">
               {routeLabel}
             </p>
+            {!part11Mode ? (
+              <label className="flex items-center gap-2 text-[0.8125rem] font-semibold text-(--secondary)">
+                <select
+                  aria-label={`Signer ${order} role`}
+                  className="field-input min-h-9 py-1"
+                  disabled={disabled}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    onRoleChange(
+                      event.target.value === "approver" ? "approver" : "signer",
+                    )
+                  }
+                  value={signer.role}
+                >
+                  <option value="signer">Signs the document</option>
+                  <option value="approver">
+                    Approves or rejects it (no fields)
+                  </option>
+                </select>
+              </label>
+            ) : null}
+            {index > 0 && !part11Mode ? (
+              <label className="flex items-center gap-2 text-[0.8125rem] font-semibold text-(--secondary)">
+                <input
+                  checked={signer.withPrevious}
+                  className="size-4 shrink-0 cursor-pointer accent-(--accent)"
+                  disabled={disabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    onTogetherChange(event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                Sign at the same time as Signer {order - 1}
+              </label>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -744,7 +836,26 @@ export function SignersShell({
     copyRecipients,
     signers,
   );
-  const canAddSigner = signers.length < MAX_SIGNERS_PER_ENVELOPE;
+  const maxSigners = record?.maxSigners ?? DEFAULT_MAX_SIGNERS_PER_ENVELOPE;
+  const part11Mode = record?.part11Mode ?? false;
+  const canAddSigner = signers.length < maxSigners;
+  const signingSteps = computeSigningSteps(signers, part11Mode);
+  const hasSharedStep = new Set(signingSteps).size < signingSteps.length;
+
+  /** "Signer 2", or "Signers 2 and 3", for the signers of one step. */
+  function describeStep(step: number): string | null {
+    const places = signingSteps.flatMap((entry, index) =>
+      entry === step ? [String(index + 1)] : [],
+    );
+
+    if (places.length === 0) {
+      return null;
+    }
+
+    return places.length === 1
+      ? `Signer ${places[0]}`
+      : `Signers ${places.slice(0, -1).join(", ")} and ${places[places.length - 1]}`;
+  }
   const canAddCopyRecipient =
     copyRecipients.length < MAX_COPY_RECIPIENTS_PER_ENVELOPE;
   const canContinue =
@@ -784,12 +895,26 @@ export function SignersShell({
 
   function handleSignerChecksChange(
     signerLocalId: string,
-    patch: Partial<SignerChecks>,
+    patch: Partial<SignerChecks & Pick<ShellSigner, "role">>,
   ) {
     clearSubmitError();
     setSigners((currentSigners) =>
       currentSigners.map((signer) =>
         signer.localId === signerLocalId ? { ...signer, ...patch } : signer,
+      ),
+    );
+  }
+
+  function handleSignerTogetherChange(
+    signerLocalId: string,
+    together: boolean,
+  ) {
+    clearSubmitError();
+    setSigners((currentSigners) =>
+      currentSigners.map((signer) =>
+        signer.localId === signerLocalId
+          ? { ...signer, withPrevious: together }
+          : signer,
       ),
     );
   }
@@ -886,7 +1011,12 @@ export function SignersShell({
     setSigners((currentSigners) =>
       currentSigners.length === 1
         ? currentSigners
-        : currentSigners.filter((signer) => signer.localId !== signerLocalId),
+        : removeListedSigner(
+            currentSigners,
+            currentSigners.findIndex(
+              (signer) => signer.localId === signerLocalId,
+            ),
+          ),
     );
   }
 
@@ -916,7 +1046,9 @@ export function SignersShell({
 
     try {
       const response = await fetch(`/api/envelopes/${envelopeId}/signers`, {
-        body: JSON.stringify(buildSignerRequest(signers, copyRecipients)),
+        body: JSON.stringify(
+          buildSignerRequest(signers, copyRecipients, part11Mode),
+        ),
         headers: {
           "content-type": "application/json",
         },
@@ -978,7 +1110,10 @@ export function SignersShell({
               Signers will receive the document in this order.
             </h2>
             <p className="text-sm leading-6 text-(--secondary)">
-              Up to 10 signers per document.
+              Up to {maxSigners} signers per document.{" "}
+              {part11Mode
+                ? "In Part 11 mode each signer signs after the one before."
+                : "Signers who sign at the same time are invited together, and the next signer is invited once they have all signed."}
             </p>
           </div>
 
@@ -1022,8 +1157,24 @@ export function SignersShell({
                     handleMoveSigner(signer.localId, direction)
                   }
                   onRemove={() => handleRemoveSigner(signer.localId)}
-                  part11Mode={record?.part11Mode ?? false}
+                  onRoleChange={(role) =>
+                    handleSignerChecksChange(signer.localId, { role })
+                  }
+                  onTogetherChange={(together) =>
+                    handleSignerTogetherChange(signer.localId, together)
+                  }
+                  part11Mode={part11Mode}
+                  previousStepLabel={describeStep(
+                    (signingSteps[index] ?? 1) - 1,
+                  )}
+                  showStep={hasSharedStep}
                   signer={signer}
+                  step={signingSteps[index] ?? index + 1}
+                  stepSize={
+                    signingSteps.filter(
+                      (step) => step === (signingSteps[index] ?? index + 1),
+                    ).length
+                  }
                 />
               );
             })}
@@ -1116,7 +1267,10 @@ export function SignersShell({
           </div>
 
           <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
-            <ShellButton href="/envelopes/new" variant="secondary">
+            {/* The document is part of the draft and is not uploaded again,
+                so Back goes to this draft's own page, where it can be
+                continued or deleted, not to a blank upload form. */}
+            <ShellButton href={`/envelopes/${envelopeId}`} variant="secondary">
               ← Back
             </ShellButton>
             <ShellButton

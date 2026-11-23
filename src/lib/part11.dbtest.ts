@@ -10,6 +10,7 @@ import {
   checkSigningCredentials,
   MAX_SIGNING_PASSWORD_ATTEMPTS,
   type PasswordVerifier,
+  setIdentityVerification,
 } from "./part11.ts";
 import type {
   EmailService,
@@ -48,8 +49,9 @@ async function createUser(role: "admin" | "user" = "user") {
   await database.query(
     `
       insert into public."user" (
-        id, name, email, role, "emailVerified", identity_verified_at
-      ) values ($1, $2, $3, $4, true, 1)
+        id, name, email, role, "emailVerified", identity_verified_at,
+        identity_verified_name, identity_verified_email
+      ) values ($1, $2, $3, $4, true, 1, $2, $3)
     `,
     [id, `Person ${id.slice(0, 4)}`, `${id}@example.test`, role],
   );
@@ -294,5 +296,105 @@ test("an identity confirmation taken back after send stops the signature", async
       locked: false,
       ok: false,
     },
+  );
+});
+
+const NOT_CONFIRMED = {
+  attemptsLeft: MAX_SIGNING_PASSWORD_ATTEMPTS,
+  identityNotConfirmed: true,
+  locked: false,
+  ok: false,
+};
+
+test("a confirmation stops counting once the account's name or address changes", async () => {
+  for (const change of [
+    `update "user" set name = 'Someone Else' where id = $1`,
+    `update "user" set email = 'moved-' || email where id = $1`,
+  ]) {
+    const user = await createUser();
+    const { rows } = await database.query<{ email: string }>(
+      `${change} returning email`,
+      [user.id],
+    );
+
+    assert.deepEqual(
+      await checkSigningCredentials(
+        { email: rows[0]!.email, password: "right", userId: user.id },
+        { database, verifyPassword },
+      ),
+      NOT_CONFIRMED,
+      change,
+    );
+  }
+});
+
+test("a signature is refused in a name other than the confirmed person's", async () => {
+  const user = await createUser();
+  const { rows } = await database.query<{ name: string }>(
+    `select name from "user" where id = $1`,
+    [user.id],
+  );
+
+  assert.deepEqual(
+    await checkSigningCredentials(
+      {
+        email: user.email,
+        password: "right",
+        signerName: "Dr Victim Name",
+        userId: user.id,
+      },
+      { database, verifyPassword },
+    ),
+    NOT_CONFIRMED,
+  );
+  assert.deepEqual(
+    await checkSigningCredentials(
+      {
+        email: user.email,
+        password: "right",
+        signerName: rows[0]!.name,
+        userId: user.id,
+      },
+      { database, verifyPassword },
+    ),
+    { ok: true },
+  );
+});
+
+test("confirming someone again after a name change lets them sign in the new name", async () => {
+  const admin = await createUser("admin");
+  const user = await createUser();
+
+  await database.query(
+    `update "user" set name = 'Alice Married Name' where id = $1`,
+    [user.id],
+  );
+  await setIdentityVerification(
+    { email: admin.email, userId: admin.id },
+    user.id,
+    { note: "Saw the new passport", verified: true },
+    database,
+  );
+
+  const { rows } = await database.query<{
+    email: string;
+    name: string;
+  }>(
+    `select identity_verified_name as name, identity_verified_email as email from "user" where id = $1`,
+    [user.id],
+  );
+
+  assert.deepEqual(rows[0], { email: user.email, name: "Alice Married Name" });
+  assert.deepEqual(
+    await checkSigningCredentials(
+      {
+        email: user.email,
+        password: "right",
+        signerName: "Alice Married Name",
+        userId: user.id,
+      },
+      { database, verifyPassword },
+    ),
+    { ok: true },
   );
 });

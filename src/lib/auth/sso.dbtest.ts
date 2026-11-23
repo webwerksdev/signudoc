@@ -36,9 +36,10 @@ registerHooks({
 
 type Profile = {
   email?: string;
-  email_verified?: boolean;
+  email_verified?: unknown;
   name: string;
   sub: string;
+  xms_edov?: unknown;
 };
 
 let database: pg.Pool;
@@ -328,6 +329,7 @@ test("a first sign-in through the identity provider makes a verified account and
   const auth = await makeAuth();
   const { cookies, location } = await signInWithSso(auth, {
     email: "Pat@Acme.com",
+    email_verified: true,
     name: "Pat Person",
     sub: "okta-pat",
   });
@@ -337,8 +339,6 @@ test("a first sign-in through the identity provider makes a verified account and
   const user = await sessionUser(auth, cookies);
 
   assert.equal(user?.email, "pat@acme.com");
-  // Entra ID leaves email_verified out; the organization's directory is
-  // trusted for its own addresses.
   assert.equal(user?.emailVerified, true);
 
   const events = await listSystemAuditEvents({ limit: 100 }, database);
@@ -412,6 +412,7 @@ test("the sign-up rule holds for single sign-on too", async () => {
 
   const allowed = await signInWithSso(auth, {
     email: "sam@acme.com",
+    email_verified: true,
     name: "Sam",
     sub: "google-sam",
   });
@@ -437,6 +438,68 @@ test("an address the provider says is unverified is not tied to an existing acco
   assert.equal(location.pathname, "/login");
   assert.ok(location.searchParams.get("error"));
   assert.equal(await sessionUser(auth, cookies), null);
+});
+
+test("an address the provider does not vouch for never reaches an existing administrator", async () => {
+  const auth = await makeAuth();
+  const adminId = randomUUID();
+
+  await database.query(
+    `insert into "user" (id, name, email, "emailVerified", role) values ($1, 'Pat', 'pat@acme.com', true, 'admin')`,
+    [adminId],
+  );
+
+  // Left out (as Entra ID does), null, or anything that is not a plain yes.
+  const claims: Array<Partial<Profile>> = [
+    {},
+    { email_verified: null },
+    { email_verified: 1 },
+    { email_verified: "yes" },
+    { email_verified: "False" },
+    { xms_edov: false },
+  ];
+
+  for (const [index, claim] of claims.entries()) {
+    const { cookies } = await signInWithSso(auth, {
+      email: "pat@acme.com",
+      name: "Pat",
+      sub: `intruder-${String(index)}`,
+      ...claim,
+    });
+
+    assert.notEqual(
+      (await sessionUser(auth, cookies))?.id,
+      adminId,
+      JSON.stringify(claim),
+    );
+  }
+
+  const { rows } = await database.query<{ count: string }>(
+    `select count(*)::text as count from account where "userId" = $1 and "providerId" = 'sso'`,
+    [adminId],
+  );
+
+  assert.equal(rows[0]?.count, "0");
+});
+
+test("an Entra ID sign-in whose tenant owns the address's domain reaches the existing account", async () => {
+  const auth = await makeAuth();
+  const id = randomUUID();
+
+  await database.query(
+    `insert into "user" (id, name, email, "emailVerified", role) values ($1, 'Pat', 'pat@acme.com', true, 'user')`,
+    [id],
+  );
+
+  const { cookies, location } = await signInWithSso(auth, {
+    email: "pat@acme.com",
+    name: "Pat",
+    sub: "entra-pat",
+    xms_edov: true,
+  });
+
+  assert.equal(location.pathname, "/dashboard");
+  assert.equal((await sessionUser(auth, cookies))?.id, id);
 });
 
 test("with password sign-in off, only the listed addresses may use a password", async () => {

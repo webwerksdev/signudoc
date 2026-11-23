@@ -9,8 +9,10 @@ import {
   getSenderEnvelopeDownload,
 } from "@/lib/downloads";
 import { downloadRequestSchema } from "@/lib/schemas/envelope";
+import { resolveEnvelopeViewerAccess } from "@/lib/envelope-access";
 import { logRouteError } from "@/lib/security/logging";
 import { getClientIpAddress, getRequestPathname } from "@/lib/security/request";
+import { recordSystemAuditEvent } from "@/lib/services/system-audit";
 
 type EnvelopeDownloadRouteContext = {
   params: Promise<{
@@ -41,14 +43,40 @@ export async function GET(
     const { type } = downloadRequestSchema.parse({
       type: getDownloadType(request),
     });
-    const download = await getSenderEnvelopeDownload(
+    // Its sender's, or, once sent, a teammate's or any administrator's.
+    const access = await resolveEnvelopeViewerAccess(
       session.user.id,
+      id,
+      getDb(),
+    );
+    const download = await getSenderEnvelopeDownload(
+      access?.ownerUserId ?? session.user.id,
       id,
       type,
       {
         database: getDb(),
       },
     );
+
+    if (access && !access.viewerIsOwner) {
+      // An administrator or a teammate taking a copy of someone else's
+      // document is on record in the install's audit trail. No record, no
+      // file.
+      await recordSystemAuditEvent({
+        actorEmail: session.user.email,
+        actorUserId: session.user.id,
+        event: "envelope_file_downloaded",
+        ipAddress: getClientIpAddress(request.headers),
+        metadata: {
+          envelopeId: id,
+          file: type,
+          ownerEmail: access.ownerEmail,
+          ownerUserId: access.ownerUserId,
+        },
+        targetUserId: access.ownerUserId,
+        userAgent: request.headers.get("user-agent"),
+      });
+    }
 
     return await createDownloadResponse(download);
   } catch (error) {

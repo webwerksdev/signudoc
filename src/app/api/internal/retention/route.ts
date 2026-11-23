@@ -38,7 +38,11 @@ async function handle(request: Request) {
     if (caller === "authorized") {
       return NextResponse.json(
         outcome.status === "ran"
-          ? { ...outcome.summary, schedule: outcome.schedule }
+          ? {
+              ...outcome.summary,
+              deletions: outcome.deletions,
+              schedule: outcome.schedule,
+            }
           : outcome,
         { status: failed ? 500 : 200 },
       );

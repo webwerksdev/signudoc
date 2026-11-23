@@ -20,6 +20,7 @@ import {
   type Dispatch,
   type PointerEvent as ReactPointerEvent,
   type MutableRefObject,
+  type RefObject,
   type MouseEvent,
   type SetStateAction,
 } from "react";
@@ -35,6 +36,7 @@ import {
   optionsTextToShow,
   parseOptionLines,
 } from "@/lib/field-choices";
+import { getInitials } from "@/lib/initials";
 import {
   type FieldPlacement,
   type ReplaceFieldsResponse,
@@ -266,16 +268,19 @@ const autosaveDelayMs = 450;
 function buildLiveSigners(
   signers: PrepareEnvelopeData["signers"],
 ): PrepareShellSigner[] {
-  return signers
-    .slice()
-    .sort((left, right) => left.order - right.order)
-    .map((signer, index) => ({
-      ...getSignerPalette(index),
-      email: signer.email,
-      id: signer.id,
-      name: signer.name,
-      order: signer.order,
-    }));
+  return (
+    signers
+      // Approvers approve or reject the document and have no fields.
+      .filter((signer) => signer.role !== "approver")
+      .sort((left, right) => left.order - right.order)
+      .map((signer, index) => ({
+        ...getSignerPalette(index),
+        email: signer.email,
+        id: signer.id,
+        name: signer.name,
+        order: signer.order,
+      }))
+  );
 }
 
 function buildLiveFields(
@@ -365,9 +370,7 @@ async function parseJsonResponse<T>(
   response: Response,
 ): Promise<{ data: T | null; error: string | null }> {
   const payload = (await response.json().catch(() => null)) as
-    | { error?: string }
-    | T
-    | null;
+    { error?: string } | T | null;
 
   if (!response.ok) {
     return {
@@ -397,7 +400,44 @@ export function PrepareLiveShell({
     return <PrepareLiveShellError envelopeId={envelopeId} />;
   }
 
+  if (buildLiveSigners(record.signers).length === 0) {
+    return <PrepareLiveShellNoSigners envelopeId={envelopeId} />;
+  }
+
   return <PrepareLiveShellContent envelopeId={envelopeId} record={record} />;
+}
+
+// Every recipient is an approver, who has no fields: there is nobody to
+// prepare the document for until a signer is added.
+function PrepareLiveShellNoSigners({ envelopeId }: { envelopeId: string }) {
+  return (
+    <CanvasShell
+      backHref={`/envelopes/${envelopeId}/signers`}
+      backLabel="Back"
+      nextDisabled
+      nextLabel="Next →"
+      stepLabel="Step 3 of 4"
+      title='"Document"'
+    >
+      <div className="flex min-h-[calc(100vh-73px)] items-center justify-center p-4 sm:p-6 lg:p-8">
+        <section className="panel w-full max-w-[520px] p-8 text-center sm:p-10">
+          <h1 className="text-2xl font-extrabold tracking-[-0.03em] text-(--fg)">
+            Add a signer first
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-(--secondary)">
+            This document has only approvers, and approvers have no fields to
+            place.
+          </p>
+          <a
+            className="mt-7 inline-block text-sm font-semibold text-(--accent)"
+            href={`/envelopes/${envelopeId}/signers`}
+          >
+            Back to recipients
+          </a>
+        </section>
+      </div>
+    </CanvasShell>
+  );
 }
 
 function PrepareLiveShellError({ envelopeId }: { envelopeId: string }) {
@@ -451,9 +491,11 @@ function PrepareLiveShellContent({
   const [armedTool, setArmedTool] = useState<PrepareFieldType | null>(null);
   const [fields, setFields] = useState<PrepareField[]>(initialFields);
   const [isMobileToolsOpen, setIsMobileToolsOpen] = useState(false);
+  const openMobileToolsRef = useRef<HTMLButtonElement>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isContinuing, setIsContinuing] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const [isFieldInteracting, setIsFieldInteracting] = useState(false);
   const [isDocumentPanning, setIsDocumentPanning] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_DOCUMENT_ZOOM_LEVEL);
@@ -461,10 +503,17 @@ function PrepareLiveShellContent({
     string | null
   >(null);
   const autosaveTimeoutRef = useRef<number | null>(null);
+  // The saves already asked for; the next one waits for them.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const paperGridRef = useRef<HTMLDivElement | null>(null);
   const documentPanGestureRef = useRef<DocumentPanGesture | null>(null);
   const currentFieldsRef = useRef(fields);
   const lastSavedSignatureRef = useRef(serializeFieldRequest(initialFields));
+  // The field list's revision this editor last saw. Each save sends it, so
+  // the server refuses a save made against an older list instead of
+  // letting it overwrite a newer one (a save still on its way from a page
+  // the sender left, landing after one made when they came back).
+  const fieldsRevisionRef = useRef(record.fieldsRevision);
   const fieldCounterRef = useRef(initialFields.length);
   const persistFieldsRef = useRef<
     (nextFields: readonly PrepareField[]) => Promise<PersistFieldsResult>
@@ -474,6 +523,8 @@ function PrepareLiveShellContent({
   }));
 
   currentFieldsRef.current = fields;
+
+  const backHref = `/envelopes/${envelopeId}/signers`;
 
   const pageCount = record.pages.length;
   const pageFields = fields.filter((field) => field.page === activePage);
@@ -565,12 +616,71 @@ function PrepareLiveShellContent({
   }, [envelopeId, record.pdfUrl]);
 
   useEffect(() => {
-    return () => {
+    // Leaving the page before the autosave ran would drop the last change.
+    // Send it on the way out; keepalive lets the request finish after the
+    // page has gone.
+    function flushUnsavedFields() {
       if (autosaveTimeoutRef.current) {
         window.clearTimeout(autosaveTimeoutRef.current);
+        autosaveTimeoutRef.current = null;
       }
+
+      const unsaved = currentFieldsRef.current;
+
+      if (serializeFieldRequest(unsaved) === lastSavedSignatureRef.current) {
+        return;
+      }
+
+      const signature = serializeFieldRequest(unsaved);
+
+      // After any save still on its way, so this one lands last, and in the
+      // chain itself: a page the browser keeps and later shows again (Back
+      // after leaving) picks up the revision this save made before it
+      // saves again, instead of having its next save refused.
+      saveChainRef.current = saveChainRef.current.then(async () => {
+        try {
+          const response = await fetch(`/api/envelopes/${envelopeId}/fields`, {
+            body: JSON.stringify({
+              ...buildFieldRequest(unsaved),
+              expectedRevision: fieldsRevisionRef.current,
+            }),
+            headers: { "content-type": "application/json" },
+            keepalive: true,
+            method: "PUT",
+          });
+
+          if (!response.ok) {
+            return;
+          }
+
+          const saved = (await response.json()) as ReplaceFieldsResponse;
+
+          fieldsRevisionRef.current = saved.fieldsRevision;
+          lastSavedSignatureRef.current = signature;
+
+          // A page shown again from the browser's cache may have been
+          // changed while this save was on its way, even back to the list
+          // saved before it, which autosave would have skipped. Save what
+          // is on screen so the server does not keep this older list.
+          if (serializeFieldRequest(currentFieldsRef.current) !== signature) {
+            void persistFieldsRef.current(currentFieldsRef.current);
+          }
+        } catch {
+          // The page has gone, or the save did not arrive: nothing to do.
+        }
+      });
+    }
+
+    // A full page exit (closing the tab, reloading, typing an address)
+    // never unmounts the editor, so it is caught here.
+    window.addEventListener("pagehide", flushUnsavedFields);
+
+    return () => {
+      window.removeEventListener("pagehide", flushUnsavedFields);
+      // A link inside the app (the header, say) unmounts it instead.
+      flushUnsavedFields();
     };
-  }, []);
+  }, [envelopeId]);
 
   useEffect(() => {
     if (!selectedFieldId) {
@@ -616,14 +726,35 @@ function PrepareLiveShellContent({
     documentPanGestureRef.current = null;
   }, [zoomLevel]);
 
-  async function persistFields(nextFields: readonly PrepareField[]) {
+  // Each save replaces the whole list, so saves go one at a time, in the
+  // order they were asked for. Otherwise an older autosave still on its
+  // way could land after a newer save (Back, Next) and undo it.
+  function persistFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
+    const run = saveChainRef.current.then(() => sendFields(nextFields));
+
+    saveChainRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return run;
+  }
+
+  async function sendFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
     const requestedSignature = serializeFieldRequest(nextFields);
 
     setSaveError(null);
     setSaveState("saving");
 
     const response = await fetch(`/api/envelopes/${envelopeId}/fields`, {
-      body: JSON.stringify(buildFieldRequest(nextFields)),
+      body: JSON.stringify({
+        ...buildFieldRequest(nextFields),
+        expectedRevision: fieldsRevisionRef.current,
+      }),
       headers: {
         "content-type": "application/json",
       },
@@ -638,6 +769,11 @@ function PrepareLiveShellContent({
         ok: false,
         redirectPath: null,
       };
+    }
+
+    // Saved, so the next save is made against this list.
+    if (payload.data) {
+      fieldsRevisionRef.current = payload.data.fieldsRevision;
     }
 
     if (
@@ -723,6 +859,56 @@ function PrepareLiveShellContent({
     }
   }
 
+  // Back saves a change the autosave has not sent yet, then goes. If the
+  // save fails, the sender stays here with the error, so nothing they can
+  // see on the page is lost.
+  async function handleBack(event: MouseEvent<HTMLAnchorElement>) {
+    // A click that opens Back in a new tab or window leaves this page open,
+    // and its autosave still runs, so the browser handles it as usual.
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+
+    if (
+      serializeFieldRequest(currentFieldsRef.current) ===
+      lastSavedSignatureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (isLeaving) {
+      return;
+    }
+
+    setIsLeaving(true);
+
+    if (autosaveTimeoutRef.current) {
+      window.clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
+
+    try {
+      const saveResult = await persistFields(currentFieldsRef.current);
+
+      if (saveResult.ok) {
+        window.location.assign(backHref);
+      }
+    } catch {
+      setSaveError("Your changes could not be saved. Try again.");
+      setSaveState("error");
+    } finally {
+      setIsLeaving(false);
+    }
+  }
+
   function beginDocumentPan(event: ReactPointerEvent<HTMLDivElement>) {
     documentPanGestureRef.current = beginDocumentPanGesture({
       canStart: !armedTool,
@@ -758,11 +944,12 @@ function PrepareLiveShellContent({
 
   return (
     <CanvasShell
-      backHref={`/envelopes/${envelopeId}/signers`}
+      backHref={backHref}
       backLabel="Back"
       nextDisabled={!canContinue}
       nextLabel="Next →"
       nextLoading={isContinuing}
+      onBack={(event) => void handleBack(event)}
       onNext={handleContinue}
       stepLabel="Step 3 of 4"
       title={`"${record.title}"`}
@@ -831,16 +1018,12 @@ function PrepareLiveShellContent({
                 <DocumentZoomControls
                   onDecrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom - DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom - DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onIncrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom + DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom + DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onReset={() => setZoomLevel(DEFAULT_DOCUMENT_ZOOM_LEVEL)}
@@ -893,7 +1076,9 @@ function PrepareLiveShellContent({
 
               <div className="flex justify-center lg:justify-end">
                 <SaveStatusIndicator
-                  onRetrySave={() => void persistFields(currentFieldsRef.current)}
+                  onRetrySave={() =>
+                    void persistFields(currentFieldsRef.current)
+                  }
                   saveError={saveError}
                   saveState={saveState}
                 />
@@ -923,6 +1108,7 @@ function PrepareLiveShellContent({
               <Button
                 className="min-h-12"
                 onClick={() => setIsMobileToolsOpen(true)}
+                ref={openMobileToolsRef}
                 type="button"
                 variant="secondary"
               >
@@ -1135,50 +1321,19 @@ function PrepareLiveShellContent({
       </div>
 
       {isMobileToolsOpen ? (
-        <div className="fixed inset-0 z-40 lg:hidden">
-          <button
-            aria-label="Close field tools"
-            className="absolute inset-0 bg-[rgba(28,29,43,0.32)]"
-            onClick={() => setIsMobileToolsOpen(false)}
-            type="button"
-          />
-          <div
-            aria-label="Field tools"
-            className="absolute inset-x-0 bottom-0 rounded-t-[1.75rem] bg-white px-4 py-5 shadow-[0_-24px_60px_rgba(28,29,43,0.18)]"
-            role="dialog"
-          >
-            <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-(--surface-strong)" />
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <p className="section-eyebrow">Fields</p>
-                <button
-                  className="text-sm font-bold text-(--accent-ink)"
-                  onClick={() => setIsMobileToolsOpen(false)}
-                  type="button"
-                >
-                  Done
-                </button>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {fieldTools.map((tool) => (
-                  <FieldToolButton
-                    isActive={armedTool === tool.type}
-                    key={`mobile-${tool.type}`}
-                    onSelect={() =>
-                      handleToolSelect(
-                        tool.type,
-                        setArmedTool,
-                        setSelectedFieldId,
-                        setIsMobileToolsOpen,
-                      )
-                    }
-                    tool={tool}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
+        <MobileFieldToolsSheet
+          armedTool={armedTool}
+          onClose={() => setIsMobileToolsOpen(false)}
+          onSelectTool={(tool) =>
+            handleToolSelect(
+              tool,
+              setArmedTool,
+              setSelectedFieldId,
+              setIsMobileToolsOpen,
+            )
+          }
+          returnFocusRef={openMobileToolsRef}
+        />
       ) : null}
     </CanvasShell>
   );
@@ -1195,6 +1350,142 @@ const fieldToolIcons: Record<PrepareFieldType, LucideIcon> = {
   signature: SignatureIcon,
   text: TypeIcon,
 };
+
+type MobileFieldToolsSheetProps = {
+  armedTool: PrepareFieldType | null;
+  onClose: () => void;
+  onSelectTool: (tool: PrepareFieldType) => void;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
+};
+
+/**
+ * The phone-sized list of field tools, shown over the editor. It is a modal
+ * dialog: focus moves into it when it opens, stays inside it while it is
+ * open, and goes back to "Open field tools" when it closes. Escape closes it
+ * like Done does, leaving the chosen tool as it was. It is never taller than
+ * the screen: Done stays at the top and the tools scroll beneath it.
+ */
+function MobileFieldToolsSheet({
+  armedTool,
+  onClose,
+  onSelectTool,
+  returnFocusRef,
+}: MobileFieldToolsSheetProps) {
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const doneRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  useEffect(() => {
+    const returnFocusTo = returnFocusRef.current;
+
+    doneRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab" || !sheetRef.current) {
+        return;
+      }
+
+      const focusable = Array.from(
+        sheetRef.current.querySelectorAll<HTMLElement>(
+          "button:not([disabled])",
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (!first || !last) {
+        return;
+      }
+
+      const active = document.activeElement;
+      const isInside = sheetRef.current.contains(active);
+
+      if (event.shiftKey && (active === first || !isInside)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !isInside)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    // The sheet is hidden (lg:hidden) on the desktop layout but would stay
+    // mounted, its listener still catching Tab and Escape. So it closes when
+    // the window grows to that layout.
+    const desktopLayout = window.matchMedia("(min-width: 64rem)");
+
+    function handleLayoutChange(event: MediaQueryListEvent) {
+      if (event.matches) {
+        onCloseRef.current();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    desktopLayout.addEventListener("change", handleLayoutChange);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      desktopLayout.removeEventListener("change", handleLayoutChange);
+      returnFocusTo?.focus();
+    };
+  }, [returnFocusRef]);
+
+  return (
+    <div className="fixed inset-0 z-40 lg:hidden">
+      <button
+        aria-label="Close field tools"
+        className="absolute inset-0 bg-[rgba(28,29,43,0.32)]"
+        onClick={onClose}
+        tabIndex={-1}
+        type="button"
+      />
+      <div
+        aria-label="Field tools"
+        aria-modal="true"
+        className="absolute inset-x-0 bottom-0 flex max-h-[calc(100dvh-1rem)] flex-col rounded-t-[1.75rem] bg-white pt-5 shadow-[0_-24px_60px_rgba(28,29,43,0.18)]"
+        ref={sheetRef}
+        role="dialog"
+      >
+        <div className="shrink-0 px-4 pb-4">
+          <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-(--surface-strong)" />
+          <div className="flex items-center justify-between">
+            <p className="section-eyebrow">Fields</p>
+            <button
+              className="min-h-11 px-2 text-sm font-bold text-(--accent-ink)"
+              onClick={onClose}
+              ref={doneRef}
+              type="button"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {fieldTools.map((tool) => (
+              <FieldToolButton
+                isActive={armedTool === tool.type}
+                key={`mobile-${tool.type}`}
+                onSelect={() => onSelectTool(tool.type)}
+                tool={tool}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function FieldToolButton({ isActive, onSelect, tool }: FieldToolButtonProps) {
   const Icon = fieldToolIcons[tool.type];
@@ -1257,13 +1548,12 @@ function SignerCard({
             color: signer.color,
           }}
         >
-          {signer.name
-            .split(" ")
-            .map((part) => part[0])
-            .join("")}
+          {getInitials(signer.name, { max: 4 })}
         </span>
         <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-(--fg)">{signer.name}</p>
+          <p className="truncate text-sm font-bold text-(--fg)">
+            {signer.name}
+          </p>
           <p className="mt-0.5 text-xs text-(--secondary)">
             {fieldCount} field{fieldCount === 1 ? "" : "s"} placed
           </p>
@@ -1292,7 +1582,9 @@ function EmptyFieldInspector({
   return (
     <div className="well px-4 py-4">
       <p className="text-sm font-bold text-(--fg)">
-        {activeTool ? `${activeTool.label} ready to place` : "No field selected"}
+        {activeTool
+          ? `${activeTool.label} ready to place`
+          : "No field selected"}
       </p>
       <p className="mt-1.5 text-sm leading-6 text-(--secondary)">
         {activeTool
@@ -1323,10 +1615,7 @@ function SelectedSignerPanel({
             color: selectedSigner.color,
           }}
         >
-          {selectedSigner.name
-            .split(" ")
-            .map((part) => part[0])
-            .join("")}
+          {getInitials(selectedSigner.name, { max: 4 })}
         </span>
         <div className="min-w-0">
           <p className="truncate text-sm font-bold text-(--fg)">
@@ -1808,20 +2097,18 @@ function setFieldRequired(
   required: boolean,
   setFields: Dispatch<SetStateAction<PrepareField[]>>,
 ) {
-  setFields((currentFields) =>
-    {
-      const target = currentFields.find((field) => field.id === fieldId);
+  setFields((currentFields) => {
+    const target = currentFields.find((field) => field.id === fieldId);
 
-      if (!target || !canBeOptional(target.type)) {
-        return currentFields;
-      }
+    if (!target || !canBeOptional(target.type)) {
+      return currentFields;
+    }
 
-      // A radio group is required or optional as a whole.
-      return currentFields.map((field) =>
-        isSameChoice(target, field) ? { ...field, required } : field,
-      );
-    },
-  );
+    // A radio group is required or optional as a whole.
+    return currentFields.map((field) =>
+      isSameChoice(target, field) ? { ...field, required } : field,
+    );
+  });
 }
 
 function deleteField(

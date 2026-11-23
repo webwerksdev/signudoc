@@ -3,11 +3,7 @@
 import { useState, type ChangeEvent, type FormEvent } from "react";
 
 import { FieldShell, ShellButton } from "@/components/shared/form-shell";
-import {
-  Field,
-  FieldError,
-  FieldLabel,
-} from "@/components/ui/field";
+import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
 import { contactFormSchema } from "@/lib/schemas/contact";
 
@@ -183,15 +179,11 @@ export function ContactForm() {
         </div>
 
         {successMessage ? (
-          <div className="notice notice-success">
-            {successMessage}
-          </div>
+          <div className="notice notice-success">{successMessage}</div>
         ) : null}
 
         {submitError ? (
-          <div className="notice notice-danger">
-            {submitError}
-          </div>
+          <div className="notice notice-danger">{submitError}</div>
         ) : null}
 
         <div className="grid gap-5 sm:grid-cols-2">

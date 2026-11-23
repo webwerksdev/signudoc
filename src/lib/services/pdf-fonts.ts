@@ -20,31 +20,19 @@ import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 // Not handled: right-to-left scripts (Arabic, Hebrew) and scripts that need
 // glyph shaping (Thai, the Indic scripts). Those draw as "\uFFFD".
 
-// Each path is spelled out so that Next.js file tracing copies the file into
-// the deployed function.
-const FONT_PATHS = {
-  bold: path.join(process.cwd(), "src", "assets", "fonts", "NotoSans-Bold.ttf"),
-  cjk: path.join(
-    process.cwd(),
-    "src",
-    "assets",
-    "fonts",
-    "NotoSansCJKjp-Regular.ttf",
-  ),
-  regular: path.join(
-    process.cwd(),
-    "src",
-    "assets",
-    "fonts",
-    "NotoSans-Regular.ttf",
-  ),
-  signature: path.join(
-    process.cwd(),
-    "src",
-    "assets",
-    "fonts",
-    "GreatVibes-Regular.ttf",
-  ),
+const FONT_DIRECTORY = path.join(process.cwd(), "src", "assets", "fonts");
+
+// Each file is read by its own call, with its name written out, so the
+// build can work out the path and copy just that file into a deployed
+// function. A path looked up at run time makes it copy the entire project
+// instead.
+const FONT_READERS = {
+  bold: () => fs.readFile(path.join(FONT_DIRECTORY, "NotoSans-Bold.ttf")),
+  cjk: () =>
+    fs.readFile(path.join(FONT_DIRECTORY, "NotoSansCJKjp-Regular.ttf")),
+  regular: () => fs.readFile(path.join(FONT_DIRECTORY, "NotoSans-Regular.ttf")),
+  signature: () =>
+    fs.readFile(path.join(FONT_DIRECTORY, "GreatVibes-Regular.ttf")),
 } as const;
 
 const SUBSETTER_PATH = path.join(
@@ -55,7 +43,7 @@ const SUBSETTER_PATH = path.join(
   "harfbuzz-subset.wasm",
 );
 
-type FontName = keyof typeof FONT_PATHS;
+type FontName = keyof typeof FONT_READERS;
 
 type LoadedFont = {
   bytes: Uint8Array;
@@ -68,7 +56,7 @@ function loadFont(name: FontName): Promise<LoadedFont> {
   let loaded = loadedFonts.get(name);
 
   if (!loaded) {
-    loaded = fs.readFile(FONT_PATHS[name]).then((buffer) => {
+    loaded = FONT_READERS[name]().then((buffer) => {
       const bytes = new Uint8Array(buffer);
 
       return {

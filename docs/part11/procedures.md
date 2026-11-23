@@ -6,7 +6,7 @@ Short templates for the procedures Part 11 expects you to have. Put each into yo
 
 1. Only people who sign or send regulated records get an account. Each account is for one person and is never reassigned or reused, even after the person leaves.
 2. Before confirming an identity, the administrator checks it with `[a government photo ID in person / your HR record / …]`.
-3. The administrator confirms the identity in Settings, People, Confirm identity. The note says how the check was done and gives a reference, such as "Passport seen in person, HR record 4417". The note must not contain the ID number itself.
+3. The administrator confirms the identity in Settings, People, Confirm identity. The note says how the check was done and gives a reference, such as "Passport seen in person, HR record 4417". The note must not contain the ID number itself. The confirmation is of the account's name and email address as they are then: if either changes, the person cannot sign until an administrator checks them and confirms them again. Envelopes are sent, and signed, in the confirmed name.
 4. `[A second administrator reviews new confirmations within N days.]`
 5. When a person leaves or changes role, the administrator takes back their identity confirmation the same day, then closes or limits the account.
 6. Every `[quarter]`, an administrator reviews every confirmed account against the current staff list, and records the review.

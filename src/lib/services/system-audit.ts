@@ -42,7 +42,22 @@ export const systemAuditEventTypes = [
   "two_factor_requirement_changed",
   "logo_changed",
   "email_domain_changed",
+  "api_key_created",
+  "api_key_revoked",
+  "webhook_endpoint_created",
+  "webhook_endpoint_changed",
+  "webhook_endpoint_deleted",
+  "embed_origin_added",
+  "embed_origin_removed",
   "envelope_deleted",
+  "envelope_file_downloaded",
+  "envelope_deletion_scheduled",
+  "envelope_deletion_cancelled",
+  "team_created",
+  "team_updated",
+  "team_deleted",
+  "team_member_added",
+  "team_member_removed",
 ] as const;
 
 export type SystemAuditEventType = (typeof systemAuditEventTypes)[number];
@@ -60,8 +75,17 @@ export type SystemAuditEvent = {
   userAgent: string | null;
 };
 
+export type SystemAuditActorType = "system" | "user";
+
 export type RecordSystemAuditEventInput = {
   actorEmail?: string | null;
+  /**
+   * Who did it, for the JSON audit line only (it is not a column and is
+   * not hashed). "system" is the install's own scheduled jobs, such as the
+   * daily cleanup deleting a closed account. Left out, it is "user": a
+   * person did it, even an unknown one, such as a failed sign-in.
+   */
+  actorType?: SystemAuditActorType;
   actorUserId?: string | null;
   createdAt?: number;
   event: SystemAuditEventType;
@@ -72,7 +96,7 @@ export type RecordSystemAuditEventInput = {
 };
 
 /** One key for the whole chain: writers take turns. */
-const SYSTEM_AUDIT_LOCK_ID = 746108325;
+export const SYSTEM_AUDIT_LOCK_ID = 746108325;
 
 type ChainedFields = Omit<SystemAuditEvent, never>;
 
@@ -152,7 +176,7 @@ async function insertChained(
   afterCommit(database, () => {
     logAuditRecord({
       ...fields,
-      actorType: "user",
+      actorType: input.actorType ?? "user",
       rowHash,
       trail: "site",
     });

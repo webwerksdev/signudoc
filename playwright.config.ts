@@ -74,6 +74,10 @@ export default defineConfig({
         // a real Vercel Blob store, direct browser upload included.
         STORAGE_DRIVER: process.env.E2E_STORAGE_DRIVER ?? "local",
         STORAGE_LOCAL_DIR: path.join(e2eDataDir, "storage"),
+        // The page that frames embedded signing in the test is plain http.
+        EMBED_ALLOW_HTTP_ORIGINS: "1",
+        // The webhook receiver in the test listens on 127.0.0.1.
+        WEBHOOK_ALLOW_PRIVATE_URLS: "1",
       },
       reuseExistingServer: false,
       timeout: 300_000,

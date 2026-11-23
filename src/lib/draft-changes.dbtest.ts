@@ -10,6 +10,8 @@ import type pg from "pg";
 import { afterStatement, openTestDatabase } from "./db/test-database.ts";
 import {
   EnvelopeMutationError,
+  FIELDS_CHANGED_MESSAGE,
+  getPrepareEnvelopeDataForUser,
   replaceDraftEnvelopeFields,
   replaceDraftEnvelopeSigners,
   sendDraftEnvelope,
@@ -427,4 +429,59 @@ test("sending with no email provider is refused as a setup state and leaves the 
   );
 
   assert.equal(sent.length, 0);
+});
+
+test("a field save made on an older page does not overwrite a newer one", async () => {
+  const draft = await createDraft();
+  // Two field editors opened on the same list: the one the sender is
+  // leaving, and the one they open on coming back.
+  const opened = await getPrepareEnvelopeDataForUser(
+    draft.userId,
+    draft.envelopeId,
+    { database },
+  );
+  const seenRevision = opened?.fieldsRevision;
+
+  assert.equal(typeof seenRevision, "number");
+
+  // The page they came back to saves first.
+  const saved = await replaceDraftEnvelopeFields(
+    draft.userId,
+    draft.envelopeId,
+    {
+      expectedRevision: seenRevision,
+      fields: [field(draft.casey, "signature", 0.7)],
+    },
+    database,
+  );
+
+  assert.equal(saved.fieldsRevision, seenRevision! + 1);
+
+  // The departing page's save lands afterwards, against the older list.
+  await assert.rejects(
+    replaceDraftEnvelopeFields(
+      draft.userId,
+      draft.envelopeId,
+      {
+        expectedRevision: seenRevision,
+        fields: [field(draft.riley, "signature", 0.5)],
+      },
+      database,
+    ),
+    refusedWith(409, new RegExp(FIELDS_CHANGED_MESSAGE.slice(0, 30))),
+  );
+
+  assert.deepEqual(await fieldSignersOf(draft.envelopeId), [draft.casey]);
+
+  // A save that names no revision (a template filling a new draft, say)
+  // still goes through.
+  const unchecked = await replaceDraftEnvelopeFields(
+    draft.userId,
+    draft.envelopeId,
+    { fields: [field(draft.riley, "signature", 0.5)] },
+    database,
+  );
+
+  assert.equal(unchecked.fieldsRevision, seenRevision! + 2);
+  assert.deepEqual(await fieldSignersOf(draft.envelopeId), [draft.riley]);
 });

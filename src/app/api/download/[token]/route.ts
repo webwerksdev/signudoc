@@ -9,7 +9,7 @@ import {
 } from "@/lib/downloads";
 import { logRouteError } from "@/lib/security/logging";
 import {
-  applyRateLimit,
+  applyPublicLinkRateLimit,
   buildRateLimitKey,
 } from "@/lib/security/route-controls";
 import { getClientIpAddress } from "@/lib/security/request";
@@ -28,7 +28,7 @@ export async function GET(
   context: PublicDownloadRouteContext,
 ) {
   const { token } = await context.params;
-  const rateLimitResponse = await applyRateLimit({
+  const rateLimitResponse = await applyPublicLinkRateLimit({
     category: "public_download",
     key: buildRateLimitKey([
       "public-download",

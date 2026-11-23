@@ -9,6 +9,7 @@ type VerifyAnswer =
       fileKind: "signed-document" | "certificate";
       finishedAt: number | null;
       match: true;
+      approverCount?: number;
       signerCount: number;
       status: "completed" | "declined" | "voided";
       title: string;
@@ -123,8 +124,11 @@ export function VerifyForm() {
                 ? ` on ${dateFormatter.format(new Date(answer.finishedAt * 1000))} UTC`
                 : ""}{" "}
               with {answer.signerCount} signer
-              {answer.signerCount === 1 ? "" : "s"}. Envelope ID{" "}
-              {answer.envelopeId}.
+              {answer.signerCount === 1 ? "" : "s"}
+              {answer.approverCount
+                ? ` and ${answer.approverCount} approver${answer.approverCount === 1 ? "" : "s"}`
+                : ""}
+              . Envelope ID {answer.envelopeId}.
             </p>
           </div>
         ) : null}

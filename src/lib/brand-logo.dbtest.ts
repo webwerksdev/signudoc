@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { crc32 } from "node:zlib";
 
 import type pg from "pg";
 
@@ -21,17 +22,26 @@ type SettingsSnapshot = Record<string, unknown> | null;
 let database: pg.Pool;
 let settingsBefore: SettingsSnapshot = null;
 
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+// Adds a text chunk so each marker gives a different, still valid, PNG.
 function png(marker: number): Uint8Array {
-  return Uint8Array.from([
-    0x89,
-    0x50,
-    0x4e,
-    0x47,
-    0x0d,
-    0x0a,
-    0x1a,
-    0x0a,
-    marker,
+  const typeAndData = Buffer.from(`tEXtmarker\0${marker}`, "latin1");
+  const chunk = Buffer.alloc(typeAndData.length + 8);
+
+  chunk.writeUInt32BE(typeAndData.length - 4, 0);
+  typeAndData.copy(chunk, 4);
+  chunk.writeUInt32BE(crc32(typeAndData), chunk.length - 4);
+
+  const headerEnd = 8 + 25;
+
+  return Buffer.concat([
+    ONE_PIXEL_PNG.subarray(0, headerEnd),
+    chunk,
+    ONE_PIXEL_PNG.subarray(headerEnd),
   ]);
 }
 
@@ -137,6 +147,24 @@ test("what is not an image never reaches the database", async () => {
     BrandLogoError,
   );
   assert.equal(await readBrandLogo(database), null);
+});
+
+test("a cut-off image never replaces the logo there is", async () => {
+  const version = await saveBrandLogo(png(6), database);
+  const whole = png(7);
+
+  for (const length of [8, 29, whole.length - 1]) {
+    await assert.rejects(
+      saveBrandLogo(whole.subarray(0, length), database),
+      BrandLogoError,
+    );
+  }
+
+  const stored = await readBrandLogo(database);
+
+  assert.equal(stored?.version, version);
+  assert.deepEqual([...stored.bytes], [...png(6)]);
+  await removeBrandLogo(database);
 });
 
 test("the database itself refuses a color or a logo that is not one", async () => {

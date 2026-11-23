@@ -6,7 +6,7 @@ import {
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { isIP, type LookupFunction } from "node:net";
+import { type LookupFunction } from "node:net";
 
 import {
   algorithm,
@@ -23,6 +23,7 @@ import {
   TAG,
   type Tlv,
 } from "./der.ts";
+import { isPrivateAddress } from "./private-address.ts";
 import {
   appendDocumentSecurityStore,
   appendDocumentTimestamp,
@@ -366,54 +367,6 @@ export type ValidationFetch = (
     signal?: AbortSignal;
   },
 ) => Promise<Buffer>;
-
-function isPrivateAddress(host: string): boolean {
-  const address = host.replace(/^\[|\]$/g, "").toLowerCase();
-
-  if (address === "localhost" || address.endsWith(".localhost")) {
-    return true;
-  }
-
-  const version = isIP(address);
-
-  if (version === 4) {
-    const [a, b] = address.split(".").map(Number) as [number, number];
-
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 198 && (b === 18 || b === 19)) ||
-      // Multicast, reserved and broadcast.
-      a >= 224
-    );
-  }
-
-  if (version === 6) {
-    // An IPv4 address mapped into IPv6, which URL writes in hex.
-    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(address);
-    const mapped = hex
-      ? [parseInt(hex[1]!, 16), parseInt(hex[2]!, 16)]
-          .flatMap((word) => [word >> 8, word & 0xff])
-          .join(".")
-      : /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(address)?.[1];
-
-    return (
-      address === "::" ||
-      address === "::1" ||
-      /^f[cd]/.test(address) ||
-      /^fe[89ab]/.test(address) ||
-      /^ff/.test(address) ||
-      (mapped ? isPrivateAddress(mapped) : false)
-    );
-  }
-
-  return false;
-}
 
 type AddressLookup = (
   hostname: string,

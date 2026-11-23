@@ -7,12 +7,14 @@ import { after, before, test } from "node:test";
 
 import type pg from "pg";
 
+import { createApiKey } from "./api-keys.ts";
 import { afterStatement, openTestDatabase } from "./db/test-database.ts";
 import { runRetentionSweep } from "./retention.ts";
 import {
   createStorageService,
   type StorageService,
 } from "./services/storage.ts";
+import { SYSTEM_AUDIT_LOCK_ID } from "./services/system-audit.ts";
 
 // Deleting a closed account against a real Postgres, timed against a signer
 // who finishes one of its envelopes at that moment. A signed record is the
@@ -281,4 +283,97 @@ test("with no administrator to take it, an envelope completed during the deletio
       [administrators.rows.map((row) => row.id)],
     );
   }
+});
+
+test("deleting a closed account takes its API key rows before the audit lock, as revoking a key does", async () => {
+  // revokeApiKey locks a key row and then the audit chain. Hold a key row of
+  // the account the way it does: the deletion has to wait for it without
+  // already holding the audit chain, or the two would deadlock.
+  await createUser("admin");
+
+  const leaver = await createUser("admin");
+  const { summary: key } = await createApiKey(
+    { email: `${leaver}@example.test`, userId: leaver },
+    { expiresInDays: null, name: "Leaver's app", scope: "write" },
+    database,
+  );
+
+  await closeAccount(leaver);
+
+  const holder = await database.connect();
+  let sweep: ReturnType<typeof runRetentionSweep> | undefined;
+
+  try {
+    await holder.query("begin");
+    await holder.query(`select id from api_keys where id = $1 for update`, [
+      key.id,
+    ]);
+
+    sweep = runRetentionSweep({ database, storageService });
+    await waitForLockWaiter();
+
+    const free = await holder.query<{ locked: boolean }>(
+      `select pg_try_advisory_xact_lock($1) as locked`,
+      [SYSTEM_AUDIT_LOCK_ID],
+    );
+
+    assert.equal(free.rows[0]?.locked, true);
+  } finally {
+    await holder.query("rollback").catch(() => undefined);
+    holder.release();
+  }
+
+  assert.ok(sweep);
+
+  const summary = await sweep;
+
+  assert.ok(!summary.accountPurgeFailures.includes(leaver));
+  assert.equal(await accountExists(leaver), false);
+  assert.equal(
+    (await database.query(`select 1 from api_keys where id = $1`, [key.id]))
+      .rowCount,
+    0,
+  );
+});
+
+test("the daily job's account deletion is logged as the system's, not a person's", async () => {
+  const leaver = await createUser();
+
+  await closeAccount(leaver);
+
+  // The JSON audit lines go to console.info once the change commits.
+  const lines: Record<string, unknown>[] = [];
+  const originalInfo = console.info;
+
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] === "string") {
+      try {
+        lines.push(JSON.parse(args[0]) as Record<string, unknown>);
+      } catch {
+        // Not a JSON line.
+      }
+    }
+  };
+
+  try {
+    const summary = await runRetentionSweep({ database, storageService });
+
+    assert.ok(!summary.accountPurgeFailures.includes(leaver));
+  } finally {
+    console.info = originalInfo;
+  }
+
+  assert.equal(await accountExists(leaver), false);
+
+  const deletion = lines.find(
+    (line) =>
+      line.trail === "site" &&
+      line.event === "account_deleted" &&
+      line.targetUserId === leaver,
+  );
+
+  assert.ok(deletion, "no audit line for the account deletion");
+  assert.equal(deletion.actorType, "system");
+  assert.equal(deletion.actorUserId, null);
+  assert.equal(deletion.actorEmail, null);
 });
